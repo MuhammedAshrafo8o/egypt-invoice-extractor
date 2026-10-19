@@ -178,6 +178,15 @@ class AuthAndAccessTests(AppTestCase):
             self.assertEqual(s2.get(self.base + url).status_code, 404, url)
         self.assertNotIn("عميل خاص", s2.get(self.base + "/").text)
 
+    def test_register_errors_are_shown_not_crashing(self):
+        self.session("dup@x.com", name="مكتب")
+        r = requests.post(self.base + "/register", data={"name": "مكتب تاني", "email": "dup@x.com",
+                                                         "password": "password123"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("الإيميل ده متسجل قبل كده", r.text)
+        r = requests.post(self.base + "/register", data={"name": "", "email": "bad", "password": "1"})
+        self.assertEqual(r.status_code, 400)
+
     def test_csrf_required(self):
         s = self.session("csrf@x.com")
         r = s.post(self.base + "/clients", data={"name": "بدون توكن"})
@@ -240,11 +249,14 @@ class InvoiceFlowTests(AppTestCase):
         r = s.get(f"{self.base}/clients/{cid}/export.xlsx?period={PERIOD}")
         self.assertEqual(r.status_code, 200)
         wb = load_workbook(io.BytesIO(r.content))
-        self.assertEqual(wb.sheetnames, ["ملخص الإقرار", "المشتريات", "المبيعات"])
+        self.assertEqual(wb.sheetnames, ["ملخص الإقرار", "المشتريات", "المبيعات", "المشتريات حسب المورد"])
         purchases = wb["المشتريات"]
         self.assertEqual(purchases.max_row, 1 + 4 + 1)  # header + 4 invoices + totals
         self.assertTrue(str(purchases.cell(row=6, column=8).value).startswith("=SUMIFS"))
-        self.assertEqual(wb["ملخص الإقرار"]["B10"].value, "=B7-B9")
+        self.assertEqual(wb["ملخص الإقرار"]["B11"].value, "=B8-B10")
+        # The "counted" column must give exactly the system's totals (what SUMIFS will add up).
+        counted_vat = sum(r[7] or 0 for r in purchases.iter_rows(min_row=2, max_row=5, values_only=True) if r[11] == "نعم")
+        self.assertAlmostEqual(counted_vat, summary["purchases"]["vat"])
 
     def test_single_upload_opens_the_invoice(self):
         s = self.session("single@x.com")
@@ -285,6 +297,33 @@ class InvoiceFlowTests(AppTestCase):
                    files=[("files", ("notes.txt", b"hello", "text/plain"))])
         self.assertIn("مش مدعوم", r.text)
         self.assertEqual(self.db.list_invoices(cid), [])
+
+
+class ExcelExportTests(unittest.TestCase):
+    """The counted flag in the workbook must follow the same rule as the on-screen summary."""
+
+    def test_counted_rule_matches_summary_on_edge_cases(self):
+        from app.exports import build_workbook, is_counted
+        from openpyxl import load_workbook
+
+        def inv(i, **kw):
+            base = dict(id=i, status="ok", approved=0, direction="purchase", currency="EGP", issues=[], channel="upload",
+                        invoice_date="2026-09-10", invoice_number=f"N{i}", supplier_name=f"S{i}", supplier_tax_id=f"{i}" * 9,
+                        buyer_name=None, buyer_tax_id=None, subtotal=100.0 * i, vat_rate=0.14, vat_amount=14.0 * i,
+                        total=114.0 * i)
+            base.update(kw)
+            return base
+
+        rows = [inv(1), inv(2, status="review"), inv(3, status="error", approved=1), inv(4, status="error"),
+                inv(5, currency="USD"), inv(6, direction="sale", buyer_name="B", buyer_tax_id="999999999")]
+        expected_in = [1, 2, 3, 6]
+        self.assertEqual([r["id"] for r in rows if is_counted(r)], expected_in)
+        data = build_workbook({"name": "X", "tax_id": "300112455"}, "2026-09", rows, {"review_count": 1})
+        wb = load_workbook(io.BytesIO(data))
+        flags = {r[2]: r[11] for r in wb["المشتريات"].iter_rows(min_row=2, values_only=True) if r[2]}
+        self.assertEqual(flags, {"N1": "نعم", "N2": "نعم", "N3": "نعم", "N4": "لا", "N5": "لا"})
+        self.assertEqual(wb["المشتريات"]["B2"].number_format, "dd/mm/yyyy")
+        self.assertTrue(wb["المشتريات"].auto_filter.ref)
 
 
 class AccountantValueTests(AppTestCase):
@@ -359,6 +398,47 @@ class AccountantValueTests(AppTestCase):
         self.assertGreaterEqual(len(ids), 1)
         page = s.get(f"{self.base}/invoices/{ids[0]}?queue=1").text
         self.assertIn("فاتورة 1 من", page)
+
+
+class SearchAndAnalyticsTests(AppTestCase):
+    def setUp(self):
+        # A fresh account per test so invoices don't pile up across tests.
+        self.s = self.session(f"search-{self._testMethodName}@x.com")
+        self.cid = self.create_client(self.s, "شركة الدلتا", "300112455")
+        self.upload(self.s, self.cid, "07_arabic.pdf", "01_digital_ok.pdf", "02_total_mismatch.pdf")
+
+    def test_arabic_insensitive_search_and_filters(self):
+        page = self.s.get(self.base + "/invoices", params={"q": "الاهرام"}).text  # stored as «الأهرام»
+        self.assertIn("1 فاتورة", page)
+        self.assertIn("شركة الأهرام", page)
+        for q in ("512-334-901", "١١٤٠٠", "11,400", "inv-2026"):
+            self.assertIn("1 فاتورة", self.s.get(self.base + "/invoices", params={"q": q}).text, q)
+        errors = self.s.get(self.base + "/invoices", params={"status": "error"}).text
+        self.assertIn("1 فاتورة", errors)
+        self.assertIn("Cairo Print House", errors)
+        big = self.s.get(self.base + "/invoices", params={"min": "6000"}).text
+        self.assertIn("1 فاتورة", big)  # only the 11,400 invoice
+        other = self.session("someone-else@x.com")
+        self.assertIn("0 فاتورة", other.get(self.base + "/invoices", params={"q": "الاهرام"}).text)
+
+    def test_csv_export_and_quick_search(self):
+        r = self.s.get(self.base + "/invoices/export.csv", params={"q": "الأهرام"})
+        self.assertTrue(r.content.startswith(b"\xef\xbb\xbf"))  # BOM so Excel shows Arabic
+        text = r.content.decode("utf-8-sig")
+        self.assertEqual(len(text.strip().splitlines()), 2)
+        self.assertIn("488201736", text)
+        data = self.s.get(self.base + "/api/search", params={"q": "دلتا"}).json()
+        self.assertEqual(data["clients"][0]["name"], "شركة الدلتا")
+        data = self.s.get(self.base + "/api/search", params={"q": "Nile"}).json()
+        self.assertTrue(data["invoices"][0]["title"].startswith("Nile Office Supplies LLC"))
+
+    def test_analytics_page(self):
+        page = self.s.get(self.base + "/analytics").text
+        self.assertIn("ضريبة المخرجات والمدخلات", page)
+        self.assertIn("<svg", page)
+        self.assertIn("أكبر الموردين في ضريبة المدخلات", page)
+        self.assertIn("الإجمالي مش مظبوط", page)  # problem category from the wrong-total invoice
+        self.assertIn("Nile Office Supplies LLC", page)
 
 
 class WhatsAppTests(AppTestCase):

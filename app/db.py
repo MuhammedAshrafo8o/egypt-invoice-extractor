@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS whatsapp_messages (
 );
 """
 
+# Same rule as InvoiceService.summary() and the Excel export: no errors (or approved anyway), in EGP.
+COUNTED = "(i.status != 'error' OR i.approved = 1) AND COALESCE(i.currency, 'EGP') = 'EGP'"
+
 INVOICE_FIELDS = (
     "supplier_name", "supplier_tax_id", "buyer_name", "buyer_tax_id", "invoice_number",
     "invoice_date", "currency", "subtotal", "vat_rate", "vat_amount", "total",
@@ -108,6 +111,8 @@ class Database:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
+        # norm(): Arabic-insensitive matching for search (ة/ه, أ/إ/آ/ا, ى/ي, Arabic digits, case)
+        conn.create_function("norm", 1, _norm, deterministic=True)
         try:
             yield conn
             conn.commit()
@@ -201,14 +206,14 @@ class Database:
     def list_clients(self, accountant_id: int, period: str) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT c.*,
                   COUNT(i.id) AS invoice_count,
                   SUM(CASE WHEN i.status = 'error' AND i.approved = 0 THEN 1 ELSE 0 END) AS error_count,
                   SUM(CASE WHEN i.status = 'review' AND i.approved = 0 THEN 1 ELSE 0 END) AS review_count,
-                  SUM(CASE WHEN i.direction = 'purchase' AND (i.status != 'error' OR i.approved = 1)
+                  SUM(CASE WHEN i.direction = 'purchase' AND {COUNTED}
                            THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS input_vat,
-                  SUM(CASE WHEN i.direction = 'sale' AND (i.status != 'error' OR i.approved = 1)
+                  SUM(CASE WHEN i.direction = 'sale' AND {COUNTED}
                            THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS output_vat,
                   (SELECT MAX(created_at) FROM invoices WHERE client_id = c.id) AS last_received
                 FROM clients c
@@ -260,6 +265,88 @@ class Database:
         with self.connect() as conn:
             row = conn.execute(sql, args).fetchone()
         return _invoice_dict(row) if row else None
+
+    SEARCH_SORTS = {
+        "date_desc": "COALESCE(i.invoice_date, i.created_at) DESC, i.id DESC",
+        "date_asc": "COALESCE(i.invoice_date, i.created_at) ASC, i.id ASC",
+        "total_desc": "COALESCE(i.total, 0) DESC, i.id DESC",
+        "vat_desc": "COALESCE(i.vat_amount, 0) DESC, i.id DESC",
+        "recent": "i.created_at DESC, i.id DESC",
+    }
+
+    def search_invoices(self, accountant_id: int, q: str = "", client_id: Optional[int] = None,
+                        period: Optional[str] = None, status: Optional[str] = None,
+                        direction: Optional[str] = None, channel: Optional[str] = None,
+                        date_from: Optional[str] = None, date_to: Optional[str] = None,
+                        amount_min: Optional[float] = None, amount_max: Optional[float] = None,
+                        sort: str = "date_desc", limit: int = 100, offset: int = 0) -> tuple[list[dict], dict]:
+        """Invoices across the office's clients matching the filters, plus totals for the whole result."""
+        where, args = ["c.accountant_id = ?"], [accountant_id]
+        q = (q or "").strip()
+        if q:
+            like = f"%{_norm(q)}%"
+            text = ("(norm(i.supplier_name) LIKE ? OR norm(i.buyer_name) LIKE ? OR norm(i.invoice_number) LIKE ? "
+                    "OR norm(i.supplier_tax_id) LIKE ? OR norm(i.buyer_tax_id) LIKE ? OR norm(i.original_filename) LIKE ? "
+                    "OR norm(c.name) LIKE ?")
+            text_args = [like] * 7
+            amount = _as_number(q)
+            if amount is not None:
+                text += " OR ABS(COALESCE(i.total,0) - ?) < 0.01 OR ABS(COALESCE(i.subtotal,0) - ?) < 0.01 " \
+                        "OR ABS(COALESCE(i.vat_amount,0) - ?) < 0.01"
+                text_args += [amount] * 3
+            where.append(text + ")")
+            args += text_args
+        if client_id:
+            where.append("i.client_id = ?")
+            args.append(client_id)
+        if period:
+            where.append("i.period = ?")
+            args.append(period)
+        status_sql = {
+            "pending": "i.approved = 0 AND i.status != 'ok'",
+            "error": "i.approved = 0 AND i.status = 'error'",
+            "review": "i.approved = 0 AND i.status = 'review'",
+            "ok": "(i.status = 'ok' OR i.approved = 1)",
+            "approved": "i.approved = 1",
+        }.get(status or "")
+        if status_sql:
+            where.append(status_sql)
+        if direction in ("purchase", "sale"):
+            where.append("i.direction = ?")
+            args.append(direction)
+        if channel in ("upload", "whatsapp", "eta_sync"):
+            where.append("i.channel = ?")
+            args.append(channel)
+        if date_from:
+            where.append("i.invoice_date >= ?")
+            args.append(date_from)
+        if date_to:
+            where.append("i.invoice_date <= ?")
+            args.append(date_to)
+        if amount_min is not None:
+            where.append("COALESCE(i.total, 0) >= ?")
+            args.append(amount_min)
+        if amount_max is not None:
+            where.append("COALESCE(i.total, 0) <= ?")
+            args.append(amount_max)
+        base = f"FROM invoices i JOIN clients c ON c.id = i.client_id WHERE {' AND '.join(where)}"
+        order = self.SEARCH_SORTS.get(sort, self.SEARCH_SORTS["date_desc"])
+        with self.connect() as conn:
+            rows = conn.execute(f"SELECT i.*, c.name AS client_name {base} ORDER BY {order} LIMIT ? OFFSET ?",
+                                (*args, limit, offset)).fetchall()
+            agg = conn.execute(
+                f"SELECT COUNT(*) AS n, SUM(COALESCE(i.subtotal,0)) AS subtotal, SUM(COALESCE(i.vat_amount,0)) AS vat, "
+                f"SUM(COALESCE(i.total,0)) AS total {base}", args).fetchone()
+        totals = {k: (agg[k] or 0) for k in ("n", "subtotal", "vat", "total")}
+        return [_invoice_dict(r) for r in rows], totals
+
+    def search_clients(self, accountant_id: int, q: str, limit: int = 8) -> list[dict]:
+        like = f"%{_norm(q)}%"
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id, name, tax_id FROM clients WHERE accountant_id = ? AND "
+                                "(norm(name) LIKE ? OR norm(tax_id) LIKE ?) ORDER BY name LIMIT ?",
+                                (accountant_id, like, like, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def list_invoices(self, client_id: int, period: Optional[str] = None,
                       status: Optional[str] = None, direction: Optional[str] = None) -> list[dict]:
@@ -326,6 +413,53 @@ class Database:
                 WHERE c.accountant_id = ? AND i.period = ?
                 """, (accountant_id, period)).fetchone()
         return {k: row[k] or 0 for k in row.keys()}
+
+    # -------------------------------------------------------------- analytics
+    def monthly_series(self, accountant_id: int, periods: list[str]) -> dict:
+        """Per month: output/input VAT (counted invoices) and invoice counts per channel."""
+        marks = ",".join("?" * len(periods))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT i.period,
+                  SUM(CASE WHEN i.direction = 'sale' AND {COUNTED} THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS output_vat,
+                  SUM(CASE WHEN i.direction = 'purchase' AND {COUNTED} THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS input_vat,
+                  COUNT(*) AS invoices,
+                  SUM(CASE WHEN i.channel = 'upload' THEN 1 ELSE 0 END) AS upload,
+                  SUM(CASE WHEN i.channel = 'whatsapp' THEN 1 ELSE 0 END) AS whatsapp,
+                  SUM(CASE WHEN i.channel = 'eta_sync' THEN 1 ELSE 0 END) AS eta_sync,
+                  SUM(CASE WHEN i.status = 'error' THEN 1 ELSE 0 END) AS errors,
+                  SUM(CASE WHEN i.status = 'ok' AND i.source_type IS NOT NULL AND i.source_type != 'unknown'
+                      THEN 1 ELSE 0 END) AS clean_auto
+                FROM invoices i JOIN clients c ON c.id = i.client_id
+                WHERE c.accountant_id = ? AND i.period IN ({marks})
+                GROUP BY i.period
+                """, (accountant_id, *periods)).fetchall()
+        found = {r["period"]: dict(r) for r in rows}
+        empty = {"output_vat": 0, "input_vat": 0, "invoices": 0, "upload": 0, "whatsapp": 0, "eta_sync": 0,
+                 "errors": 0, "clean_auto": 0}
+        return {p: {**empty, **{k: v or 0 for k, v in found.get(p, {}).items() if k != "period"}} for p in periods}
+
+    def top_suppliers(self, accountant_id: int, period: str, limit: int = 8) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT COALESCE(NULLIF(i.supplier_tax_id, ''), i.supplier_name) AS key,
+                  MAX(i.supplier_name) AS name, MAX(i.supplier_tax_id) AS tax_id,
+                  COUNT(*) AS invoices, COUNT(DISTINCT i.client_id) AS clients,
+                  SUM(COALESCE(i.vat_amount, 0)) AS vat, SUM(COALESCE(i.total, 0)) AS total
+                FROM invoices i JOIN clients c ON c.id = i.client_id
+                WHERE c.accountant_id = ? AND i.period = ? AND i.direction = 'purchase' AND {COUNTED}
+                GROUP BY key ORDER BY vat DESC LIMIT ?
+                """, (accountant_id, period, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def period_issues(self, accountant_id: int, period: str) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT i.issues_json FROM invoices i JOIN clients c ON c.id = i.client_id "
+                "WHERE c.accountant_id = ? AND i.period = ?", (accountant_id, period)).fetchall()
+        return [json.loads(r["issues_json"] or "[]") for r in rows]
 
     def pending_invoices(self, accountant_id: int, limit: int = 500) -> list[dict]:
         """Every invoice that still needs the accountant, across all clients (the review queue)."""
@@ -396,6 +530,24 @@ class Database:
         with self.connect() as conn:
             conn.execute("UPDATE whatsapp_messages SET invoice_id = ? WHERE message_id = ?",
                          (invoice_id, message_id))
+
+
+def _norm(value) -> str:
+    if value is None:
+        return ""
+    from invoice_extractor.normalize import normalize_text
+
+    return normalize_text(str(value)).lower().replace("-", "").replace(" ", "")
+
+
+def _as_number(text: str) -> Optional[float]:
+    from invoice_extractor.normalize import normalize_text
+
+    cleaned = normalize_text(text).replace(",", "").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 def _invoice_dict(row: sqlite3.Row) -> dict:

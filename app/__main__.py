@@ -51,8 +51,50 @@ def create_demo() -> None:
         service.add_file(target, path.name, path.read_bytes())
         if path.name.startswith("01_"):
             service.add_file(client, path.name, path.read_bytes())  # same invoice as a purchase
-    print("\n✅ اتعمل حساب تجريبي فيه عميلين وفواتير:")
+    _demo_history(db, uid)
+    print("\n✅ اتعمل حساب تجريبي فيه عملاء وفواتير (و٥ شهور قبل كده عشان التحليلات):")
     print(f"   الإيميل: {email}\n   كلمة السر: {password}\n")
+
+
+def _demo_history(db, uid: int) -> None:
+    """Five earlier months of plausible, approved invoices so the analytics page has something to show."""
+    import random
+    from datetime import date as _date
+
+    rng = random.Random(42)
+    clients = {c["name"]: c for c in db.list_clients(uid, "2000-01")}
+    suppliers = [("شركة الأهرام للتوريدات الهندسية", "488201736"), ("Nile Office Supplies LLC", "512334901"),
+                 ("Giza Building Materials", "377901224"), ("مؤسسة النور للأدوات المكتبية", "615904382"),
+                 ("Alex Logistics S.A.E", "205778341"), ("مطبعة القاهرة", "410229873")]
+    buyers = [("سوبر ماركت الهدى", "700112233"), ("فندق النيل", "700445566"), ("شركة المقاولات المتحدة", "700778899")]
+    today = _date.today()
+    for back in range(5, 0, -1):
+        y, m = today.year, today.month - back
+        while m <= 0:
+            y, m = y - 1, m + 12
+        period = f"{y}-{m:02d}"
+        for name, client in clients.items():
+            n = rng.randint(6, 12)
+            for k in range(n):
+                sale = client["tax_id"] in ("512334901", "421907335") or rng.random() < 0.25
+                party = rng.choice(buyers if sale else suppliers)
+                sub = round(rng.uniform(800, 18000), -1)
+                if client["name"] == "مطعم السلطان" and back == 2:
+                    sub *= 2.6  # one unusual month, so the analytics flag it
+                vat = round(sub * 0.14, 2)
+                channel = rng.choices(["upload", "whatsapp", "eta_sync"], weights=[6 - back, back + 2, 3])[0]
+                db.insert_invoice(client["id"], {
+                    "direction": "sale" if sale else "purchase", "status": "ok", "approved": 1,
+                    "source_type": "eta_api" if channel == "eta_sync" else "ai_vision", "channel": channel,
+                    "original_filename": f"demo_{period}_{k}.jpg", "period": period,
+                    "supplier_name": client["name"] if sale else party[0],
+                    "supplier_tax_id": client["tax_id"] if sale else party[1],
+                    "buyer_name": party[0] if sale else client["name"], "buyer_tax_id": party[1] if sale else client["tax_id"],
+                    "invoice_number": f"D{period.replace('-', '')}{client['id']}{k:02d}",
+                    "invoice_date": f"{period}-{rng.randint(1, 28):02d}", "currency": "EGP",
+                    "subtotal": sub, "vat_rate": 0.14, "vat_amount": vat, "total": round(sub + vat, 2),
+                })
+                db.remember_party(uid, party[1], party[0])
 
 
 TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata"

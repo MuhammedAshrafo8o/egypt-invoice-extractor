@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}الفواتير{% endblock %}
+{% set FILTER_LABELS = {'client': 'العميل', 'period': 'الشهر', 'status': 'الحالة', 'direction': 'النوع', 'channel': 'المصدر',
+                        'from': 'من', 'to': 'لحد', 'min': 'أقل مبلغ', 'max': 'أكبر مبلغ', 'q': 'بحث'} %}
+{% set STATUS_FILTER = {'pending': 'محتاجة شغل', 'error': 'أخطاء', 'review': 'مراجعة', 'ok': 'سليمة أو معتمدة', 'approved': 'معتمدة'} %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>الفواتير</h1>
+    <p class="sub">دوّر في كل فواتير عملاءك باسم المورد، أو رقم الفاتورة، أو الرقم الضريبي، أو المبلغ.</p>
+  </div>
+</div>
+
+<form method="get" class="panel filters" id="filters">
+  <div class="filter-search">
+    <label class="search big" aria-label="بحث">{{ icon('search') }}
+      <input type="search" name="q" value="{{ params.q }}" placeholder="مثلًا: الأهرام، INV-2026، 512334901، 11400" autofocus></label>
+    <button class="btn btn-primary" type="submit">بحث</button>
+  </div>
+  <div class="filter-row">
+    <select name="client" aria-label="العميل">
+      <option value="">كل العملاء</option>
+      {% for c in clients %}<option value="{{ c.id }}" {% if params.client_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+    </select>
+    <select name="period" aria-label="الشهر">
+      <option value="">كل الشهور</option>
+      {% for p in periods %}<option value="{{ p }}" {% if params.period == p %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+    </select>
+    <select name="status" aria-label="الحالة">
+      <option value="">كل الحالات</option>
+      {% for k, v in STATUS_FILTER.items() %}<option value="{{ k }}" {% if params.status == k %}selected{% endif %}>{{ v }}</option>{% endfor %}
+    </select>
+    <select name="direction" aria-label="النوع">
+      <option value="">مشتريات ومبيعات</option>
+      <option value="purchase" {% if params.direction == 'purchase' %}selected{% endif %}>مشتريات</option>
+      <option value="sale" {% if params.direction == 'sale' %}selected{% endif %}>مبيعات</option>
+    </select>
+    <select name="channel" aria-label="المصدر">
+      <option value="">كل المصادر</option>
+      {% for k, v in CHANNEL_LABELS.items() %}<option value="{{ k }}" {% if params.channel == k %}selected{% endif %}>{{ v }}</option>{% endfor %}
+    </select>
+  </div>
+  <details class="more-filters" {% if params.date_from or params.date_to or params.amount_min is not none or params.amount_max is not none %}open{% endif %}>
+    <summary>فلاتر التاريخ والمبلغ</summary>
+    <div class="filter-row">
+      <label>من تاريخ<input type="date" name="from" value="{{ params.date_from or '' }}"></label>
+      <label>لحد تاريخ<input type="date" name="to" value="{{ params.date_to or '' }}"></label>
+      <label>الإجمالي من<input name="min" inputmode="decimal" class="num-input" value="{{ params.amount_min if params.amount_min is not none else '' }}"></label>
+      <label>الإجمالي لحد<input name="max" inputmode="decimal" class="num-input" value="{{ params.amount_max if params.amount_max is not none else '' }}"></label>
+    </div>
+  </details>
+  <input type="hidden" name="sort" value="{{ params.sort }}">
+</form>
+
+{% if active %}
+<div class="chips">
+  {% for k, v in active.items() %}
+    <a class="filter-chip" href="?{{ query_string(**{k: ''}) }}" title="شيل الفلتر">
+      <span class="muted">{{ FILTER_LABELS.get(k, k) }}:</span>
+      {% if k == 'client' %}{% for c in clients if c.id|string == v %}{{ c.name }}{% endfor %}
+      {% elif k == 'period' %}{{ v|period_label }}
+      {% elif k == 'status' %}{{ STATUS_FILTER.get(v, v) }}
+      {% elif k == 'direction' %}{{ 'مبيعات' if v == 'sale' else 'مشتريات' }}
+      {% elif k == 'channel' %}{{ CHANNEL_LABELS.get(v, v) }}
+      {% elif k in ('from', 'to') %}{{ v|dmy }}
+      {% else %}{{ v }}{% endif %}
+      <span aria-hidden="true">×</span></a>
+  {% endfor %}
+  <a class="link-btn small" href="/invoices">امسح كل الفلاتر</a>
+</div>
+{% endif %}
+
+<section class="panel">
+  <div class="results-bar">
+    <div><strong>{{ totals.n }} فاتورة</strong>
+      {% if totals.n %}<span class="muted"> بإجمالي <span class="num-text">{{ totals.total|money }}</span>، ضريبة <span class="num-text">{{ totals.vat|money }}</span></span>{% endif %}</div>
+    <div class="head-actions">
+      <form method="get" class="inline">
+        {% for k, v in request.query_params.items() if k not in ('sort', 'page') %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+        <select name="sort" onchange="this.form.submit()" aria-label="الترتيب">
+          <option value="date_desc" {% if params.sort == 'date_desc' %}selected{% endif %}>الأحدث تاريخًا</option>
+          <option value="date_asc" {% if params.sort == 'date_asc' %}selected{% endif %}>الأقدم تاريخًا</option>
+          <option value="total_desc" {% if params.sort == 'total_desc' %}selected{% endif %}>الأكبر مبلغًا</option>
+          <option value="vat_desc" {% if params.sort == 'vat_desc' %}selected{% endif %}>الأكبر ضريبة</option>
+          <option value="recent" {% if params.sort == 'recent' %}selected{% endif %}>آخر اللي وصل</option>
+        </select>
+      </form>
+      {% if totals.n %}<a class="btn" href="/invoices/export.csv?{{ query_string() }}">{{ icon('excel') }} تصدير النتايج</a>{% endif %}
+    </div>
+  </div>
+
+  {% if rows %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr>
+      <th>الحالة</th><th>الطرف الآخر</th><th>العميل</th><th>التاريخ</th><th>رقم الفاتورة</th>
+      <th class="num">الضريبة</th><th class="num">الإجمالي</th>
+    </tr></thead>
+    <tbody>
+    {% for inv in rows %}
+      {% set other = inv.buyer_name if inv.direction == 'sale' else inv.supplier_name %}
+      <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}'">
+        <td>{% if inv.approved %}<span class="chip chip-approved">معتمدة</span>
+            {% else %}<span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span>{% endif %}</td>
+        <td><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
+          <span class="tag">{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</span>
+          {% set tid = inv.buyer_tax_id if inv.direction == 'sale' else inv.supplier_tax_id %}
+          {% if tid %}<div class="row-note num-text">{{ tid }}</div>{% endif %}</td>
+        <td><a href="/clients/{{ inv.client_id }}?period={{ inv.period }}" onclick="event.stopPropagation()">{{ inv.client_name }}</a></td>
+        <td><span class="num-text">{{ inv.invoice_date|dmy }}</span></td>
+        <td class="nowrap"><bdi>{{ inv.invoice_number or '—' }}</bdi></td>
+        <td class="num">{{ inv.vat_amount|money }}</td>
+        <td class="num strong">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if pages > 1 %}
+  <nav class="pager" aria-label="الصفحات">
+    {% if page > 1 %}<a class="btn btn-small" href="?{{ query_string(page=page - 1) }}">السابقة</a>{% endif %}
+    <span class="muted small">صفحة {{ page }} من {{ pages }}</span>
+    {% if page < pages %}<a class="btn btn-small" href="?{{ query_string(page=page + 1) }}">التالية</a>{% endif %}
+  </nav>
+  {% endif %}
+  {% else %}
+  <div class="empty">
+    <h2>مفيش فواتير بالبحث ده</h2>
+    <p class="muted">جرّب كلمة أقصر، أو شيل فلتر من اللي فوق.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Filters apply as soon as they change.
+document.querySelectorAll('#filters select, #filters input[type=date]').forEach(function (el) {
+  el.addEventListener('change', function () { el.form.submit(); });
+});
+</script>
+{% endblock %}

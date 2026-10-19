@@ -12,9 +12,12 @@
 <div class="shell">
   <aside class="sidebar">
     <a class="brand" href="/"><span class="brand-mark">د</span> دفتر</a>
+    <button type="button" class="quick-search" data-open-palette>{{ icon('search') }}<span class="nav-text">بحث سريع</span><kbd>Ctrl K</kbd></button>
     <a class="nav-link {% if nav == 'home' %}active{% endif %}" href="/">{{ icon('home') }}<span class="nav-text">الرئيسية</span></a>
     <a class="nav-link {% if nav == 'review' %}active{% endif %}" href="/review">{{ icon('review') }}<span class="nav-text">محتاج مراجعة</span>
       {% if pending_total %}<span class="nav-badge">{{ pending_total }}</span>{% endif %}</a>
+    <a class="nav-link {% if nav == 'invoices' %}active{% endif %}" href="/invoices">{{ icon('invoices') }}<span class="nav-text">الفواتير</span></a>
+    <a class="nav-link {% if nav == 'analytics' %}active{% endif %}" href="/analytics">{{ icon('chart') }}<span class="nav-text">التحليلات</span></a>
     <a class="nav-link {% if nav == 'clients' %}active{% endif %}" href="/#clients">{{ icon('clients') }}<span class="nav-text">العملاء</span></a>
     <div class="sidebar-foot">
       <div class="reader {{ reader.kind }}" title="الطريقة اللي بتتقري بيها الصور والـ PDF الممسوح — بتتغيّر من ملف .env">
@@ -34,6 +37,16 @@
 {% else %}
   {% block guest %}{% endblock %}
 {% endif %}
+{% if user %}
+<div class="palette" id="palette" hidden role="dialog" aria-modal="true" aria-label="بحث سريع"
+     data-actions='[{"title":"الرئيسية","href":"/"},{"title":"محتاج مراجعة","href":"/review","sub":"ابدأ المراجعة"},{"title":"الفواتير","href":"/invoices","sub":"بحث وفلترة"},{"title":"التحليلات","href":"/analytics"},{"title":"عميل جديد","href":"/#new-client"}]'>
+  <div class="palette-box">
+    <label class="palette-input">{{ icon('search') }}<input type="text" placeholder="دوّر على عميل، مورد، رقم فاتورة، أو مبلغ" autocomplete="off"></label>
+    <ul class="palette-results" role="listbox"></ul>
+    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> تنقّل</span><span><kbd>Enter</kbd> افتح</span><span><kbd>Esc</kbd> اقفل</span></div>
+  </div>
+</div>
+{% endif %}
 <div class="busy-overlay" id="busy" hidden>
   <div class="busy-card"><div class="spinner"></div><strong id="busy-text">ثواني…</strong>
     <p class="muted small" id="busy-sub"></p></div>
@@ -52,6 +65,7 @@ document.addEventListener('click', function (e) {
   if (b) b.parentElement.remove();
 });
 </script>
+<script src="/static/app.js" defer></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

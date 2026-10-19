@@ -95,6 +95,13 @@
     </div>
   </div>
 
+  <form method="get" class="table-search">
+    <input type="hidden" name="period" value="{{ period }}">
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    {% if direction %}<input type="hidden" name="direction" value="{{ direction }}">{% endif %}
+    <label class="search" aria-label="بحث في فواتير العميل">{{ icon('search') }}
+      <input type="search" name="q" value="{{ q or '' }}" placeholder="دوّر في فواتير {{ client.name }}: مورد، رقم فاتورة، رقم ضريبي، مبلغ"></label>
+  </form>
   {% if invoices %}
   {% set reviewable = invoices|selectattr('status', 'equalto', 'review')|rejectattr('approved')|list %}
   <form method="post" action="/clients/{{ client.id }}/approve" id="bulk-form">

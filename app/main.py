@@ -22,7 +22,7 @@ from starlette.templating import Jinja2Templates
 
 from invoice_extractor.extractors import ai_vision, ocr
 
-from . import whatsapp
+from . import charts, whatsapp
 from .config import Settings, load_settings
 from .db import Database
 from .exports import build_workbook
@@ -51,6 +51,30 @@ ISSUE_FIELDS = {
     "invoice_number": ("invoice_number",), "duplicate": ("invoice_number",),
     "same_tax_id": ("supplier_tax_id", "buyer_tax_id"),
 }
+
+
+# Problem categories for analytics: (label, test on issue code)
+ISSUE_CATEGORIES = [
+    ("بيانات ناقصة في الفاتورة", lambda c: c.endswith("_missing") and c != "invoice_number_missing"),
+    ("الإجمالي مش مظبوط", lambda c: c == "total_mismatch"),
+    ("فاتورة مكررة", lambda c: c == "duplicate"),
+    ("رقم ضريبي غلط أو مشكوك فيه", lambda c: c.endswith("_format") or c.endswith("_near_known") or c.endswith("_national_id")),
+    ("تاريخ غلط أو قديم", lambda c: c.startswith("date_")),
+    ("نسبة ضريبة غير معتادة", lambda c: c.startswith("vat_rate") or c == "vat_missing"),
+    ("صورة صعبة القراءة", lambda c: c in ("ocr_used", "ai_low_confidence", "ai_unavailable", "ai_failed", "ocr_failed")),
+    ("فاتورة إلكترونية العميل مش مربوط", lambda c: c == "eta_document"),
+]
+
+
+def previous_period(period: str) -> str:
+    y, m = map(int, period.split("-"))
+    return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
+
+
+def pct_change(cur: float, prev: float):
+    if not prev:
+        return None
+    return round(100 * (cur - prev) / abs(prev))
 
 
 def issue_fields(issues: list) -> dict:
@@ -138,13 +162,13 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             return {"kind": "ocr", "label": label}
         return {"kind": "off", "label": "قراءة الصور مقفولة"}
 
-    def render(request: Request, name: str, status_code: int = 200, **ctx):
+    def render(request: Request, template: str, status_code: int = 200, **ctx):
         session = request.session
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(24)
         flashes = session.pop("flashes", [])
         user = db.get_accountant(session["uid"]) if session.get("uid") else None
-        return templates.TemplateResponse(request, name, {
+        return templates.TemplateResponse(request, template, {
             "user": user, "csrf": session["csrf"], "flashes": flashes,
             "settings": settings, "reader": reader_status(),
             "pending_total": db.pending_count(user["id"]) if user else 0, **ctx,
@@ -271,6 +295,169 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                       periods=recent_periods(), totals=totals, deadline=deadline, quiet=quiet,
                       stats=stats, hours_saved=round(minutes / 60, 1))
 
+    def search_params(request: Request) -> dict:
+        """Read invoice-search filters from the query string (shared by the page, CSV export and API)."""
+        qp = request.query_params
+
+        def num(name):
+            try:
+                return float(str(qp.get(name)).replace(",", "")) if qp.get(name) not in (None, "") else None
+            except ValueError:
+                return None
+
+        def day(name):
+            value = qp.get(name) or ""
+            return value if len(value) == 10 and value[4] == "-" and value[7] == "-" else None
+
+        client_id = qp.get("client")
+        period = qp.get("period")
+        return {
+            "q": (qp.get("q") or "").strip()[:100],
+            "client_id": int(client_id) if client_id and client_id.isdigit() else None,
+            "period": period if period and valid_period(period) == period else None,
+            "status": qp.get("status") or None,
+            "direction": qp.get("direction") or None,
+            "channel": qp.get("channel") or None,
+            "date_from": day("from"), "date_to": day("to"),
+            "amount_min": num("min"), "amount_max": num("max"),
+            "sort": qp.get("sort") or "date_desc",
+        }
+
+    @login_required
+    async def invoices_page(request: Request):
+        params = search_params(request)
+        page = max(1, int(request.query_params.get("page") or 1)) if str(request.query_params.get("page") or "1").isdigit() else 1
+        per_page = 50
+        rows, totals = db.search_invoices(request.state.user["id"], limit=per_page, offset=(page - 1) * per_page, **params)
+        clients = db.list_clients(request.state.user["id"], current_period())
+        active = {k: v for k, v in request.query_params.items() if v and k not in ("page", "sort")}
+        return render(request, "invoices.html", nav="invoices", rows=rows, totals=totals, params=params,
+                      clients=clients, periods=recent_periods(), page=page, per_page=per_page,
+                      pages=max(1, -(-totals["n"] // per_page)), active=active,
+                      query_string=lambda **kw: urlencode({**{k: v for k, v in request.query_params.items() if v},
+                                                           **{k: v for k, v in kw.items()}}))
+
+    @login_required
+    async def invoices_csv(request: Request):
+        import csv
+        import io as _io
+
+        rows, _ = db.search_invoices(request.state.user["id"], limit=10000, **search_params(request))
+        buf = _io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["العميل", "التاريخ", "رقم الفاتورة", "النوع", "المورد", "الرقم الضريبي للمورد", "المشتري",
+                         "الرقم الضريبي للمشتري", "قبل الضريبة", "الضريبة", "الإجمالي", "العملة", "الحالة", "المصدر"])
+        for r in rows:
+            writer.writerow([r["client_name"], dmy(r["invoice_date"]), r["invoice_number"] or "",
+                             "مبيعات" if r["direction"] == "sale" else "مشتريات", r["supplier_name"] or "",
+                             r["supplier_tax_id"] or "", r["buyer_name"] or "", r["buyer_tax_id"] or "",
+                             r["subtotal"] if r["subtotal"] is not None else "",
+                             r["vat_amount"] if r["vat_amount"] is not None else "",
+                             r["total"] if r["total"] is not None else "", r["currency"] or "",
+                             "معتمدة" if r["approved"] else STATUS_LABELS.get(r["status"], r["status"]),
+                             CHANNEL_LABELS.get(r["channel"], r["channel"])])
+        return Response(("\ufeff" + buf.getvalue()).encode("utf-8"), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="invoices.csv"'})
+
+    @login_required
+    async def api_search(request: Request):
+        """Quick results for the command palette (Ctrl+K)."""
+        q = (request.query_params.get("q") or "").strip()[:100]
+        if not q:
+            return JSONResponse({"clients": [], "invoices": []})
+        uid = request.state.user["id"]
+        invoices, _ = db.search_invoices(uid, q=q, limit=8, sort="recent")
+        return JSONResponse({
+            "clients": [{"id": c["id"], "name": c["name"], "tax_id": c["tax_id"]} for c in db.search_clients(uid, q)],
+            "invoices": [{"id": i["id"], "title": ((i["buyer_name"] if i["direction"] == "sale" else i["supplier_name"])
+                                                  or i["original_filename"] or "فاتورة")
+                          + (f" — {i['invoice_number']}" if i["invoice_number"] else ""),
+                          "client": i["client_name"], "total": money(i["total"]), "date": dmy(i["invoice_date"]),
+                          "status": "approved" if i["approved"] else i["status"]} for i in invoices],
+        })
+
+    @login_required
+    async def analytics(request: Request):
+        uid = request.state.user["id"]
+        period = valid_period(request.query_params.get("period"))
+        months = [period]
+        for _ in range(5):
+            months.insert(0, previous_period(months[0]))
+        prev = months[-2]
+        series = db.monthly_series(uid, months)
+        cur, before = series[period], series[prev]
+        net = lambda s: round(s["output_vat"] - s["input_vat"], 2)  # noqa: E731
+
+        labels = [period_label(m).split(" ")[0] for m in months]
+        vat_chart = charts.bar_chart(labels, [
+            {"name": "ضريبة المخرجات", "values": [series[m]["output_vat"] for m in months]},
+            {"name": "ضريبة المدخلات", "values": [series[m]["input_vat"] for m in months]},
+        ], aria="ضريبة المخرجات والمدخلات لكل شهر")
+        channel_chart = charts.bar_chart(labels, [
+            {"name": "رفع ملفات", "values": [series[m]["upload"] for m in months]},
+            {"name": "واتساب", "values": [series[m]["whatsapp"] for m in months]},
+            {"name": "المنظومة", "values": [series[m]["eta_sync"] for m in months]},
+        ], stacked=True, money=False, aria="عدد الفواتير لكل شهر حسب المصدر")
+
+        # per client, this month vs last month
+        now_rows = {c["id"]: c for c in db.list_clients(uid, period)}
+        prev_rows = {c["id"]: c for c in db.list_clients(uid, prev)}
+        clients = []
+        for cid, c in now_rows.items():
+            p = prev_rows.get(cid, {})
+            c_net = (c["output_vat"] or 0) - (c["input_vat"] or 0)
+            p_net = (p.get("output_vat") or 0) - (p.get("input_vat") or 0)
+            change = pct_change(c_net, p_net)
+            clients.append({"id": cid, "name": c["name"], "invoices": c["invoice_count"] or 0,
+                            "prev_invoices": p.get("invoice_count") or 0, "net": c_net, "prev_net": p_net,
+                            "change": change, "pending": (c["error_count"] or 0) + (c["review_count"] or 0),
+                            "flag": change is not None and abs(change) >= 50 and abs(c_net - p_net) >= 500})
+        clients.sort(key=lambda c: -abs(c["net"]))
+
+        # what goes wrong most
+        counts = {label: 0 for label, _ in ISSUE_CATEGORIES}
+        for issues in db.period_issues(uid, period):
+            codes = {i.get("code", "") for i in issues}
+            for label, test in ISSUE_CATEGORIES:
+                if any(test(c) for c in codes):
+                    counts[label] += 1
+        problems = sorted(((k, v) for k, v in counts.items() if v), key=lambda kv: -kv[1])
+
+        suppliers = db.top_suppliers(uid, period)
+        stats = db.work_stats(uid, period)
+
+        # plain-language observations
+        insights = []
+        if cur["invoices"]:
+            share_wa = round(100 * cur["whatsapp"] / cur["invoices"])
+            share_eta = round(100 * cur["eta_sync"] / cur["invoices"])
+            if share_wa:
+                insights.append(f"{share_wa}٪ من فواتير الشهر وصلت على الواتساب من غير ما حد يطاردها.")
+            if share_eta:
+                insights.append(f"{share_eta}٪ اتسحبت من المنظومة جاهزة ومعتمدة.")
+            fix_rate = round(100 * cur["errors"] / cur["invoices"])
+            insights.append(f"{fix_rate}٪ من الفواتير احتاجت تصليح." + (
+                f" أكتر سبب: {problems[0][0]}." if problems else ""))
+        for c in [c for c in clients if c["flag"]][:3]:
+            direction = "زادت" if c["net"] > c["prev_net"] else "قلّت"
+            insights.append(f"صافي ضريبة {c['name']} {direction} {abs(c['change'])}٪ عن {period_label(prev)}، "
+                            f"يستاهل نظرة قبل الإقرار.")
+        quiet = [c for c in clients if c["prev_invoices"] and not c["invoices"]]
+        if quiet:
+            names = "، ".join(c["name"] for c in quiet[:3])
+            insights.append(f"{names} بعتوا فواتير {period_label(prev)} بس لسه مابعتوش {period_label(period)}.")
+
+        return render(request, "analytics.html", nav="analytics", period=period, prev=prev,
+                      periods=recent_periods(), months=months, series=series, cur=cur, before=before,
+                      net_now=net(cur), net_prev=net(before), net_change=pct_change(net(cur), net(before)),
+                      inv_change=pct_change(cur["invoices"], before["invoices"]),
+                      vat_chart=vat_chart, channel_chart=channel_chart,
+                      vat_legend=charts.legend(["ضريبة المخرجات", "ضريبة المدخلات"]),
+                      channel_legend=charts.legend(["رفع ملفات", "واتساب", "المنظومة"]),
+                      clients=clients, problems=problems, problem_max=max([v for _, v in problems] or [1]),
+                      suppliers=suppliers, supplier_max=max([s["vat"] for s in suppliers] or [1]),
+                      hours_saved=round(stats["auto_read"] * MINUTES_PER_INVOICE / 60, 1), insights=insights)
+
     @login_required
     async def review_queue(request: Request):
         queue = db.pending_invoices(request.state.user["id"])
@@ -302,13 +489,18 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         period = valid_period(request.query_params.get("period"))
         status = request.query_params.get("status") or None
         direction = request.query_params.get("direction") or None
-        invoices = db.list_invoices(client["id"], period, status, direction)
+        q = (request.query_params.get("q") or "").strip()[:100]
+        if q:
+            invoices, _ = db.search_invoices(request.state.user["id"], q=q, client_id=client["id"], period=period,
+                                             status=status, direction=direction, limit=500)
+        else:
+            invoices = db.list_invoices(client["id"], period, status, direction)
         deadline = filing_deadline(settings.vat_deadline_day)
         remind_url = wa_link(client["whatsapp_phone"], reminder_text(
             client["name"], request.state.user["name"], period_label(period),
             deadline["days_left"] if deadline["period"] == period else None, settings.whatsapp_display_number))
         return render(request, "client.html", client=client, invoices=invoices, period=period, nav="clients",
-                      remind_url=remind_url,
+                      remind_url=remind_url, q=q,
                       periods=recent_periods(db.periods(client["id"])), status=status, direction=direction,
                       summary=service.summary(client["id"], period))
 
@@ -592,6 +784,10 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     routes = [
         Route("/", dashboard),
         Route("/review", review_queue),
+        Route("/invoices", invoices_page),
+        Route("/invoices/export.csv", invoices_csv),
+        Route("/api/search", api_search),
+        Route("/analytics", analytics),
         Route("/login", login, methods=["GET", "POST"]),
         Route("/register", register, methods=["GET", "POST"]),
         Route("/logout", logout, methods=["POST", "GET"]),

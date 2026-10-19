@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}التحليلات{% endblock %}
+{% macro delta(change, good_when_up=true) -%}
+  {% if change is not none %}
+    {% set up = change > 0 %}
+    <span class="delta {% if change == 0 or good_when_up is none %}flat{% elif up == good_when_up %}good{% else %}bad{% endif %}">
+      {% if change > 0 %}▲{% elif change < 0 %}▼{% endif %} {{ change|abs }}٪</span>
+  {% endif %}
+{%- endmacro %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>التحليلات</h1>
+    <p class="sub">{{ period|period_label }} مقارنةً بـ{{ prev|period_label }}، لكل العملاء.</p>
+  </div>
+  <form method="get" class="inline">
+    <select name="period" onchange="this.form.submit()" aria-label="الشهر">
+      {% for p in periods %}<option value="{{ p }}" {% if p == period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+    </select>
+  </form>
+</div>
+
+<section class="panel kpis">
+  <div class="kpi">
+    <div class="label">صافي الضريبة لكل العملاء</div>
+    <div class="value num-text">{{ net_now|money }}</div>
+    <div class="hint">{{ delta(net_change, none) }} الشهر اللي فات <span class="num-text">{{ net_prev|money }}</span></div>
+  </div>
+  <div class="kpi">
+    <div class="label">فواتير الشهر</div>
+    <div class="value">{{ cur.invoices }}</div>
+    <div class="hint">{{ delta(inv_change) }} الشهر اللي فات {{ before.invoices }}</div>
+  </div>
+  <div class="kpi">
+    <div class="label">احتاجت تصليح</div>
+    <div class="value">{% if cur.invoices %}{{ (100 * cur.errors / cur.invoices)|round|int }}٪{% else %}—{% endif %}</div>
+    <div class="hint">{{ cur.errors }} من {{ cur.invoices }} فاتورة</div>
+  </div>
+  <div class="kpi">
+    <div class="label">وقت وفّره السيستم</div>
+    <div class="value">{% if hours_saved >= 1 %}{{ hours_saved }} ساعة{% else %}{{ (hours_saved * 60)|round|int }} دقيقة{% endif %}</div>
+    <div class="hint">تقريبًا، دقيقة ونص لكل فاتورة</div>
+  </div>
+</section>
+
+{% if insights %}
+<section class="panel insights">
+  <h2>ملاحظات الشهر</h2>
+  <ul>{% for line in insights %}<li>{{ line }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<div class="chart-grid">
+  <section class="panel chart-card">
+    <div class="chart-head"><h2>ضريبة المخرجات والمدخلات</h2>{{ vat_legend }}</div>
+    {{ vat_chart }}
+    <details class="table-view"><summary>عرض كجدول</summary>
+      <table class="table"><thead><tr><th>الشهر</th><th class="num">المخرجات</th><th class="num">المدخلات</th><th class="num">الصافي</th></tr></thead>
+      <tbody>{% for m in months|reverse %}<tr><td>{{ m|period_label }}</td><td class="num">{{ series[m].output_vat|money }}</td>
+        <td class="num">{{ series[m].input_vat|money }}</td><td class="num strong">{{ (series[m].output_vat - series[m].input_vat)|money }}</td></tr>{% endfor %}</tbody></table>
+    </details>
+  </section>
+  <section class="panel chart-card">
+    <div class="chart-head"><h2>الفواتير جت منين</h2>{{ channel_legend }}</div>
+    {{ channel_chart }}
+    <details class="table-view"><summary>عرض كجدول</summary>
+      <table class="table"><thead><tr><th>الشهر</th><th class="num">رفع</th><th class="num">واتساب</th><th class="num">المنظومة</th></tr></thead>
+      <tbody>{% for m in months|reverse %}<tr><td>{{ m|period_label }}</td><td class="num">{{ series[m].upload }}</td>
+        <td class="num">{{ series[m].whatsapp }}</td><td class="num">{{ series[m].eta_sync }}</td></tr>{% endfor %}</tbody></table>
+    </details>
+  </section>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><h2>العملاء: {{ period|period_label }} مقابل {{ prev|period_label }}</h2>
+    <span class="muted small">التغيّر الكبير في صافي الضريبة بيتعلّم عشان تراجعه قبل الإقرار</span></div>
+  {% if clients %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>العميل</th><th class="num">فواتير</th><th class="num">صافي الشهر ده</th><th class="num">صافي الشهر اللي فات</th><th>التغيّر</th><th>محتاج مراجعة</th></tr></thead>
+    <tbody>
+    {% for c in clients %}
+      <tr class="row-link" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
+        <td><a class="strong" href="/clients/{{ c.id }}?period={{ period }}">{{ c.name }}</a></td>
+        <td class="num">{{ c.invoices }}</td>
+        <td class="num strong">{{ c.net|money }}</td>
+        <td class="num">{{ c.prev_net|money }}</td>
+        <td>{% if c.change is not none %}<span class="delta {% if c.flag %}bad{% else %}flat{% endif %}">{% if c.change > 0 %}▲{% elif c.change < 0 %}▼{% endif %} {{ c.change|abs }}٪</span>
+            {% if c.flag %}<span class="tag tag-warn">تغيّر كبير</span>{% endif %}
+            {% else %}<span class="muted small">مفيش مقارنة</span>{% endif %}</td>
+        <td>{% if c.pending %}<span class="chip chip-review">{{ c.pending }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<div class="empty"><p class="muted">لسه مفيش عملاء.</p></div>{% endif %}
+</section>
+
+<div class="chart-grid">
+  <section class="panel">
+    <div class="panel-head"><h2>أكبر الموردين في ضريبة المدخلات</h2></div>
+    {% if suppliers %}
+    <ul class="bar-list">
+      {% for s in suppliers %}
+      <li data-tip="{{ s.name or 'مورد' }} | {{ s.invoices }} فاتورة عند {{ s.clients }} عميل | الضريبة {{ s.vat|money }}" tabindex="0">
+        <div class="bar-label"><bdi class="strong">{{ s.name or '—' }}</bdi>{% if s.tax_id %}<span class="muted small num-text">{{ s.tax_id }}</span>{% endif %}</div>
+        <div class="bar-track"><i style="width: {{ (100 * s.vat / supplier_max)|round(1) }}%"></i></div>
+        <div class="bar-value num-text">{{ s.vat|money }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<div class="empty"><p class="muted">مفيش فواتير مشتريات محتسبة في {{ period|period_label }}.</p></div>{% endif %}
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>أكتر المشاكل في الفواتير</h2></div>
+    {% if problems %}
+    <ul class="bar-list">
+      {% for label, n in problems %}
+      <li data-tip="{{ label }}: {{ n }} فاتورة" tabindex="0">
+        <div class="bar-label">{{ label }}</div>
+        <div class="bar-track"><i class="alt" style="width: {{ (100 * n / problem_max)|round(1) }}%"></i></div>
+        <div class="bar-value">{{ n }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<div class="empty"><p class="muted">مفيش مشاكل في فواتير {{ period|period_label }}.</p></div>{% endif %}
+  </section>
+</div>
+{% endblock %}
