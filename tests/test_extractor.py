@@ -168,7 +168,8 @@ if __name__ == "__main__":
 
 
 AI_ENV_KEYS = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY",
-               "AI_PROVIDER", "ANTHROPIC_BASE_URL", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_FALLBACK_MODELS")
+               "AI_PROVIDER", "ANTHROPIC_BASE_URL", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_FALLBACK_MODELS",
+               "ANTHROPIC_MODEL", "ANTHROPIC_EFFORT")
 FAKE_FIELDS = ('{"supplier_tax_id": "377-901-224", "invoice_date": "2026-10-10", "subtotal": 12500, '
                '"vat_amount": 1750, "total": 14250, "invoice_number": "GB-3301", "confidence": 0.95}')
 
@@ -222,7 +223,8 @@ class AIProviderTests(unittest.TestCase):
     """Exercise the real HTTP calls against local fakes of each provider's API."""
 
     def test_anthropic(self):
-        fake = FakeAPIServer({"content": [{"type": "text", "text": "```json\n" + FAKE_FIELDS + "\n```"}]})
+        fake = FakeAPIServer({"content": [{"type": "thinking", "thinking": "reading the totals"},
+                                          {"type": "text", "text": "```json\n" + FAKE_FIELDS + "\n```"}]})
         with ai_env(ANTHROPIC_API_KEY="test-key", ANTHROPIC_BASE_URL=fake.url):
             self.assertEqual(ai_vision.provider(), "anthropic")
             data = ai_vision.extract_with_ai(SAMPLES / "05_photo.jpg")
@@ -233,6 +235,11 @@ class AIProviderTests(unittest.TestCase):
         self.assertEqual(first["headers"]["x-api-key"], "test-key")
         self.assertIn("anthropic-version", first["headers"])
         self.assertEqual(first["body"]["messages"][0]["content"][0]["type"], "image")
+        body = first["body"]
+        self.assertEqual(body["model"], "claude-haiku-5-5")
+        self.assertNotIn("temperature", body)  # rejected by current Claude models
+        self.assertEqual(body["output_config"], {"effort": "medium"})
+        self.assertGreaterEqual(body["max_tokens"], 8000)  # room for adaptive thinking
         self.assertEqual(last["body"]["messages"][0]["content"][0]["source"]["media_type"], "application/pdf")
         self.assertEqual((data["total"], pdf_data["invoice_number"]), (14250, "GB-3301"))
 

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 API_URL = "https://api.anthropic.com/v1/messages"  # override base with ANTHROPIC_BASE_URL
-DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_MODEL = "claude-haiku-5-5"  # cheapest; claude-sonnet-5-5 reads hard handwriting better
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"  # override with GEMINI_BASE_URL
 GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
 # Tried in order when the main Gemini model is overloaded (503) or rate-limited (429).
@@ -175,15 +175,25 @@ def _post(url: str, body: dict, headers: dict, timeout: int) -> dict:
 
 
 # ------------------------------------------------------------------ providers
+def _anthropic_body(path: Path, model: str) -> dict:
+    # Current Claude models think before answering (adaptive thinking) and the thinking counts
+    # toward max_tokens, so leave plenty of room. No temperature: newer models reject it.
+    body = {
+        "model": model,
+        "max_tokens": 8000,
+        "messages": [{"role": "user", "content": [_content_block(path), {"type": "text", "text": PROMPT}]}],
+    }
+    effort = os.environ.get("ANTHROPIC_EFFORT", "medium").strip().lower()
+    if effort and effort != "none":  # low | medium | high; "none" for older models without effort
+        body["output_config"] = {"effort": effort}
+    return body
+
+
 def _anthropic(path: Path, model: Optional[str], timeout: int) -> str:
     base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
     payload = _post(
         f"{base}/v1/messages" if base else API_URL,
-        {
-            "model": model or os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": [_content_block(path), {"type": "text", "text": PROMPT}]}],
-        },
+        _anthropic_body(path, model or os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)),
         {"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01"},
         timeout,
     )
