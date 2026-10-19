@@ -18,12 +18,16 @@
         {% for p in periods %}<option value="{{ p }}" {% if p == period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
       </select>
     </form>
-    {% if client.eta_client_id %}
+    {% if client.eta_client_id or settings.eta_demo %}
     <form method="post" action="/clients/{{ client.id }}/eta-sync" class="inline" data-busy="بيسحب الفواتير من المنظومة…">
       <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="period" value="{{ period }}">
       <button class="btn" type="submit">{{ icon('sync') }} سحب من المنظومة</button>
     </form>
     {% endif %}
+    <form method="post" action="/clients/{{ client.id }}/sales/new" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="btn btn-stamp" type="submit" title="اكتب فاتورة مبيعات وابعتها للمنظومة كفاتورة إلكترونية">{{ icon('plus') }} فاتورة مبيعات إلكترونية</button>
+    </form>
     {% if remind_url %}<a class="btn btn-whatsapp" href="{{ remind_url }}" target="_blank" rel="noopener" title="رسالة جاهزة تطلب فيها فواتير الشهر">{{ icon('whatsapp') }} اطلب الفواتير</a>{% endif %}
     <a class="btn" href="/clients/{{ client.id }}/report?period={{ period }}" target="_blank" rel="noopener" title="صفحة للطباعة أو PDF تبعتها لصاحب الشركة">{{ icon('report') }} تقرير للعميل</a>
     <a class="btn" href="/clients/{{ client.id }}/export.xlsx?period={{ period }}">{{ icon('excel') }} تصدير Excel</a>
@@ -62,6 +66,26 @@
     {% endif %}
   </div>
 </section>
+
+{% if missing %}
+<section class="panel eta-missing">
+  <div class="eta-missing-head">
+    <div>
+      <h2>{{ missing|length }} فاتورة مشتريات مش موجودة على المنظومة</h2>
+      <p class="muted">ضريبتها <strong class="num-text">{{ summary.missing_on_eta.vat|money }}</strong> جنيه ممكن متتخصمش من الإقرار، لأن الخصم بيتم بالفواتير الإلكترونية بس. اطلب من الموردين يصدروها على رقم العميل الضريبي.</p>
+    </div>
+    {% if missing_url %}<a class="btn btn-whatsapp" href="{{ missing_url }}" target="_blank" rel="noopener">{{ icon('whatsapp') }} ابعت القايمة للعميل</a>{% endif %}
+  </div>
+  <ul class="eta-missing-list">
+    {% for inv in missing[:8] %}
+    <li><a href="/invoices/{{ inv.id }}"><bdi class="strong">{{ inv.supplier_name or inv.original_filename or 'مورد' }}</bdi></a>
+      <span class="muted small">{% if inv.invoice_number %}<bdi>{{ inv.invoice_number }}</bdi> — {% endif %}<span class="num-text">{{ inv.invoice_date|dmy }}</span></span>
+      <span class="num-text">{{ inv.vat_amount|money }}</span></li>
+    {% endfor %}
+    {% if missing|length > 8 %}<li class="muted small">و{{ missing|length - 8 }} غيرهم…</li>{% endif %}
+  </ul>
+</section>
+{% endif %}
 
 <form method="post" action="/clients/{{ client.id }}/upload" enctype="multipart/form-data" id="upload-form"
       data-busy="بيقرا الفواتير…" data-busy-sub="الصور والملفات الممسوحة بتاخد ثواني لكل فاتورة.">
@@ -134,6 +158,8 @@
         <td><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
           <span class="tag">{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</span>
           {% if inv.channel != 'upload' %}<span class="tag">{{ CHANNEL_LABELS.get(inv.channel, inv.channel) }}</span>{% endif %}
+          {% if inv.eta_state %}<span class="tag tag-eta-{{ inv.eta_state }}">{{ ETA_STATE_LABELS.get(inv.eta_state) }}</span>
+          {% elif inv.eta_check == 'missing' and inv.direction == 'purchase' %}<span class="tag tag-warn">مش على المنظومة</span>{% endif %}
           {% if first and not inv.approved %}<div class="row-note {% if first.level == 'error' %}error{% endif %}">{{ (first.message_ar or first.message)|truncate(80) }}</div>{% endif %}</td>
         <td><span class="num-text">{{ inv.invoice_date|dmy }}</span></td>
         <td class="nowrap"><bdi>{{ inv.invoice_number or '—' }}</bdi></td>
@@ -150,6 +176,46 @@
   <div class="empty"><p class="muted">مفيش فواتير هنا لـ {{ period|period_label }}. ارفعها من فوق، أو غيّر الشهر.</p></div>
   {% endif %}
 </section>
+
+<details class="panel collapsible" id="einvoice">
+  <summary>إعدادات إصدار الفاتورة الإلكترونية</summary>
+  <div class="panel-body">
+  <p class="muted small" style="margin-bottom:14px">البيانات دي بتتكتب على كل فاتورة مبيعات بيصدرها {{ client.name }}، وبتلاقيها في بوابة المنظومة في ملف الممول. بتتظبط مرة واحدة.</p>
+  <form method="post" action="/clients/{{ client.id }}/einvoice-settings" class="grid-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>الاسم المسجّل في الضرائب<input name="issuer_name" value="{{ profile.issuer_name or '' }}" placeholder="{{ client.name }}"></label>
+    <label>كود النشاط<input name="activity_code" value="{{ profile.activity_code or '' }}" class="num-input" inputmode="numeric" placeholder="مثلًا 4620"></label>
+    <label>المحافظة<input name="governate" value="{{ profile.governate or '' }}"></label>
+    <label>المدينة / الحي<input name="region_city" value="{{ profile.region_city or '' }}"></label>
+    <label>الشارع<input name="street" value="{{ profile.street or '' }}"></label>
+    <label>رقم المبنى<input name="building_number" value="{{ profile.building_number or '' }}"></label>
+    <label>كود الفرع<input name="branch_id" value="{{ profile.branch_id or '0' }}" class="num-input"><span class="hint">٠ للفرع الرئيسي</span></label>
+    <label>بداية أرقام الفواتير<input name="number_prefix" value="{{ profile.number_prefix or 'INV-' }}" dir="ltr"></label>
+    <fieldset class="span-2">
+      <legend>كود الصنف الافتراضي</legend>
+      <p class="muted small" style="margin-bottom:12px">كل صنف في الفاتورة الإلكترونية لازم يكون ليه كود مسجّل على المنظومة (EGS أو GS1). اكتب الكود اللي العميل بيستخدمه أكتر، وتقدر تغيّره لأي صنف وإنت بتكتب الفاتورة.</p>
+      <div class="grid-form">
+        <label>نوع الكود<select name="item_type">
+          {% for t in ('EGS', 'GS1') %}<option {% if profile.item_type == t %}selected{% endif %}>{{ t }}</option>{% endfor %}</select></label>
+        <label>الكود<input name="item_code" value="{{ profile.item_code or '' }}" dir="ltr" placeholder="EG-{{ client.tax_id or '000000000' }}-1"></label>
+        <label>الوحدة<select name="unit_type">
+          {% for code, label in UNIT_TYPES.items() %}<option value="{{ code }}" {% if profile.unit_type == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      </div>
+    </fieldset>
+    <fieldset class="span-2">
+      <legend>التوقيع الإلكتروني</legend>
+      <div class="grid-form">
+        <label>التوقيع بـ<select name="signer">
+          <option value="token" {% if profile.signer == 'token' %}selected{% endif %}>التوكن (فلاشة التوقيع) متوصل بالجهاز</option>
+          <option value="pfx" {% if profile.signer == 'pfx' %}selected{% endif %}>ملف شهادة PFX على الجهاز</option></select></label>
+        <label>مكان ملف الشهادة (لو PFX)<input name="pfx_path" value="{{ profile.pfx_path or '' }}" dir="ltr" placeholder="C:\certs\client.pfx"></label>
+      </div>
+      <p class="muted small" style="margin-top:10px">{% if settings.eta_demo %}وضع التجربة شغال: السيستم بيوقّع بشهادة تجربة ومش بيبعت حاجة للمنظومة الحقيقية.{% else %}الرقم السري للتوكن أو الشهادة بيتكتب وقت الإرسال ومش بيتحفظ.{% endif %}</p>
+    </fieldset>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">حفظ الإعدادات</button></div>
+  </form>
+  </div>
+</details>
 
 <details class="panel collapsible" id="settings">
   <summary>بيانات العميل والربط بالمنظومة</summary>

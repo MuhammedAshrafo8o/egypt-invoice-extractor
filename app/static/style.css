@@ -455,3 +455,68 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
   .dropzone { flex-direction: column; text-align: center; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ------------------------------------------------ e-invoicing (issue + ETA match) */
+.notice { padding: 14px 20px; margin-bottom: 18px; display: flex; gap: 10px; flex-wrap: wrap; border-inline-start: 3px solid var(--warn); }
+.panel-foot { padding: 12px 20px; border-top: 1px solid var(--rule-2); }
+.issue-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.issue-main { min-width: 0; }
+.issue-main > fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; display: block; }
+.issue-main .panel { margin: 0 0 18px; }
+.issue-main.locked { opacity: .8; }
+.issue-side { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.issue-side > .panel { margin: 0; padding: 18px; }
+.issue-side h2 { margin-bottom: 10px; }
+.totals-card dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; }
+.totals-card dt { color: var(--ink-2); }
+.totals-card dd { margin: 0; text-align: left; }
+.totals-card .grand { font-weight: 700; font-size: 1.15rem; color: var(--ink); padding-top: 10px; border-top: 1px solid var(--rule); }
+.checklist .issues { margin: 0 0 8px; }
+.checklist.ready { border-inline-start: 3px solid var(--ok); }
+.checklist.ready h2 { color: var(--ok); }
+.send-card { display: grid; gap: 10px; }
+.send-card label { display: grid; gap: 4px; font-size: .86rem; color: var(--ink-2); }
+.seg { display: inline-flex; background: var(--rule-2); border-radius: var(--r); padding: 3px; gap: 2px; flex-wrap: wrap; }
+.seg label { cursor: pointer; position: relative; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg span { display: block; padding: 6px 16px; border-radius: 8px; font-size: .9rem; color: var(--ink-2); transition: background .15s, color .15s; }
+.seg input:checked + span { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(19, 78, 67, .14); }
+.seg input:focus-visible + span { outline: 2px solid var(--stamp); }
+.lines-table input, .lines-table select { width: 100%; min-width: 0; padding: 6px 8px; font-size: .88rem; }
+.lines-table td { vertical-align: middle; padding: 8px 6px; }
+.lines-table td:first-child { min-width: 190px; }
+.lines-table [name=unit_type] { min-width: 96px; }
+.lines-table [name=quantity] { min-width: 72px; }
+.lines-table [name=unit_price] { min-width: 100px; }
+.lines-table [name=discount] { min-width: 76px; }
+.lines-table [name=item_code] { min-width: 150px; }
+.lines-table .vat-cell { display: flex; gap: 4px; min-width: 120px; }
+.lines-table .vat-cell .rate { max-width: 58px; }
+.lines-table .line-total { min-width: 96px; }
+.lines-table .remove-line { font-size: 1.2rem; line-height: 1; color: var(--muted); }
+.eta-status { padding: 16px 20px; margin-bottom: 18px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; border-inline-start: 3px solid var(--stamp); }
+.eta-status.eta-valid { border-color: var(--ok); }
+.eta-status.eta-invalid, .eta-status.eta-rejected { border-color: var(--err); }
+.eta-status-main { display: flex; gap: 14px; align-items: center; }
+.eta-errors { flex-basis: 100%; margin: 4px 0 0; }
+.small-stamp { width: 64px; height: 64px; font-size: .74rem; }
+.eta-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; margin: 0 0 14px; border-radius: var(--r); background: var(--stamp-soft); }
+.eta-card > div { flex: 1; min-width: 180px; }
+.eta-card.eta-valid { background: var(--ok-soft); }
+.eta-card.eta-invalid, .eta-card.eta-rejected { background: var(--err-soft); }
+.tag-eta-valid { background: var(--ok-soft); color: var(--ok); }
+.tag-eta-submitted { background: var(--stamp-soft); color: var(--stamp); }
+.tag-eta-invalid, .tag-eta-rejected { background: var(--err-soft); color: var(--err); }
+.eta-missing { padding: 18px 20px; border-inline-start: 3px solid var(--warn); }
+.eta-missing-head { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.eta-missing-head p { max-width: 70ch; margin-top: 4px; }
+.eta-missing-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 2px; }
+.eta-missing-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; padding: 7px 0; border-top: 1px solid var(--rule-2); align-items: baseline; }
+@media (max-width: 1100px) {
+  .issue-side { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .eta-missing-list li { grid-template-columns: minmax(0, 1fr) auto; }
+  .eta-missing-list li > span.muted { grid-column: 1 / -1; }
+}
+.main, .issue-layout, .issue-main .panel { min-width: 0; }

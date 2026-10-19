@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS clients (
     whatsapp_phone    TEXT UNIQUE,
     eta_client_id     TEXT,
     eta_client_secret TEXT,
+    eta_profile       TEXT,   -- JSON: e-invoice issuing settings (activity code, address, item code, signer)
     notes             TEXT,
     created_at        TEXT NOT NULL
 );
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     status            TEXT NOT NULL,                      -- ok | review | error
     approved          INTEGER NOT NULL DEFAULT 0,
     source_type       TEXT,
-    channel           TEXT NOT NULL DEFAULT 'upload',     -- upload | whatsapp | eta_sync
+    channel           TEXT NOT NULL DEFAULT 'upload',     -- upload | whatsapp | eta_sync | manual
     original_filename TEXT,
     stored_path       TEXT,
     period            TEXT NOT NULL,                      -- YYYY-MM
@@ -58,6 +59,11 @@ CREATE TABLE IF NOT EXISTS invoices (
     total             REAL,
     eta_uuid          TEXT,
     eta_url           TEXT,
+    eta_draft         TEXT,   -- JSON: receiver + lines for issuing this (sale) invoice on the ETA
+    eta_state         TEXT,   -- issuing: submitted | valid | invalid | rejected
+    eta_message       TEXT,   -- JSON list: ETA errors for the last submission
+    eta_long_id       TEXT,
+    eta_check         TEXT,   -- purchases after a sync: matched | missing (not on the ETA)
     issues_json       TEXT NOT NULL DEFAULT '[]',
     raw_text          TEXT,
     created_at        TEXT NOT NULL,
@@ -72,6 +78,7 @@ CREATE TABLE IF NOT EXISTS parties (
     tax_id        TEXT NOT NULL,
     name          TEXT,
     invoice_count INTEGER NOT NULL DEFAULT 0,
+    details_json  TEXT,       -- receiver type + address, remembered for e-invoices
     last_seen     TEXT NOT NULL,
     PRIMARY KEY (accountant_id, tax_id)
 );
@@ -104,6 +111,22 @@ class Database:
         self._lock = threading.Lock()
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    # Columns added after the first release; older databases get them here.
+    MIGRATIONS = {
+        "clients": {"eta_profile": "TEXT"},
+        "invoices": {"eta_draft": "TEXT", "eta_state": "TEXT", "eta_message": "TEXT",
+                     "eta_long_id": "TEXT", "eta_check": "TEXT"},
+        "parties": {"details_json": "TEXT"},
+    }
+
+    def _migrate(self, conn) -> None:
+        for table, columns in self.MIGRATIONS.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, kind in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -160,7 +183,7 @@ class Database:
             return cur.lastrowid
 
     def update_client(self, client_id: int, **fields) -> None:
-        allowed = {"name", "tax_id", "whatsapp_phone", "notes", "eta_client_id", "eta_client_secret"}
+        allowed = {"name", "tax_id", "whatsapp_phone", "notes", "eta_client_id", "eta_client_secret", "eta_profile"}
         values = {}
         for key, value in fields.items():
             if key not in allowed:
@@ -169,6 +192,8 @@ class Database:
                 value = digits(value)
             elif key == "whatsapp_phone":
                 value = normalize_phone(value)
+            elif key == "eta_profile" and isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False)
             elif isinstance(value, str):
                 value = value.strip() or None
             values[key] = value
@@ -230,7 +255,7 @@ class Database:
     def insert_invoice(self, client_id: int, data: dict) -> int:
         cols = ["client_id", "direction", "status", "approved", "source_type", "channel",
                 "original_filename", "stored_path", "period", *INVOICE_FIELDS,
-                "eta_uuid", "eta_url", "issues_json", "raw_text", "created_at", "updated_at"]
+                "eta_uuid", "eta_url", "eta_draft", "eta_check", "issues_json", "raw_text", "created_at", "updated_at"]
         row = {
             "client_id": client_id, "approved": 0, "channel": "upload", "direction": "purchase",
             "issues_json": "[]", "created_at": now(), "updated_at": now(), **data,
@@ -244,7 +269,8 @@ class Database:
 
     def update_invoice(self, invoice_id: int, data: dict) -> None:
         allowed = {"direction", "status", "approved", "source_type", "period", "eta_uuid", "eta_url",
-                   "issues_json", "raw_text", *INVOICE_FIELDS}
+                   "issues_json", "raw_text", "eta_draft", "eta_state", "eta_message", "eta_long_id", "eta_check",
+                   "channel", *INVOICE_FIELDS}
         values = {k: v for k, v in data.items() if k in allowed}
         values["updated_at"] = now()
         sets = ", ".join(f"{k} = ?" for k in values)
@@ -314,7 +340,7 @@ class Database:
         if direction in ("purchase", "sale"):
             where.append("i.direction = ?")
             args.append(direction)
-        if channel in ("upload", "whatsapp", "eta_sync"):
+        if channel in ("upload", "whatsapp", "eta_sync", "manual"):
             where.append("i.channel = ?")
             args.append(channel)
         if date_from:
@@ -381,6 +407,44 @@ class Database:
                   invoice_count = parties.invoice_count + 1,
                   last_seen = excluded.last_seen
                 """, (accountant_id, tax_id, (name or "").strip() or None, now()))
+
+    def party_details(self, accountant_id: int, tax_id: str) -> dict:
+        with self.connect() as conn:
+            row = conn.execute("SELECT name, details_json FROM parties WHERE accountant_id = ? AND tax_id = ?",
+                               (accountant_id, tax_id)).fetchone()
+        if not row:
+            return {}
+        details = json.loads(row["details_json"] or "{}")
+        details.setdefault("name", row["name"])
+        return details
+
+    def save_party_details(self, accountant_id: int, tax_id: str, name: Optional[str], details: dict) -> None:
+        if not tax_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO parties(accountant_id, tax_id, name, invoice_count, last_seen, details_json)
+                VALUES (?,?,?,0,?,?)
+                ON CONFLICT(accountant_id, tax_id) DO UPDATE SET
+                  name = COALESCE(excluded.name, parties.name), details_json = excluded.details_json
+                """, (accountant_id, tax_id, (name or "").strip() or None, now(),
+                      json.dumps(details, ensure_ascii=False)))
+
+    def next_internal_id(self, client_id: int, prefix: str) -> str:
+        """Next free invoice number like PREFIX-0007 among this client's sales."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT invoice_number FROM invoices WHERE client_id = ? AND direction = 'sale' "
+                                "AND invoice_number LIKE ?", (client_id, prefix + "%")).fetchall()
+        used = [int(m.group(1)) for r in rows if (m := re.fullmatch(re.escape(prefix) + r"(\d+)", r[0] or ""))]
+        return f"{prefix}{(max(used) + 1 if used else 1):04d}"
+
+    def purchases_for_matching(self, client_id: int) -> list[dict]:
+        """Purchases/sales not yet linked to an ETA document (candidates to match a synced document)."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM invoices WHERE client_id = ? AND eta_uuid IS NULL "
+                                "AND channel != 'eta_sync'", (client_id,)).fetchall()
+        return [_invoice_dict(r) for r in rows]
 
     def known_parties(self, accountant_id: int) -> dict:
         with self.connect() as conn:
@@ -493,7 +557,9 @@ class Database:
         sql = f"SELECT * FROM invoices WHERE client_id = ? AND ({' OR '.join(clauses)})"
         params = [client_id, *args]
         if exclude_id:
-            sql += " AND id != ?"
+            # Re-checking a stored invoice: only an *older* copy makes it a duplicate,
+            # so editing the original never flags it against its own later copy.
+            sql += " AND id < ?"
             params.append(exclude_id)
         with self.connect() as conn:
             row = conn.execute(sql + " ORDER BY id LIMIT 1", params).fetchone()
@@ -553,6 +619,7 @@ def _as_number(text: str) -> Optional[float]:
 def _invoice_dict(row: sqlite3.Row) -> dict:
     data = dict(row)
     data["issues"] = json.loads(data.get("issues_json") or "[]")
+    data["eta_errors"] = json.loads(data.get("eta_message") or "[]")
     return data
 
 

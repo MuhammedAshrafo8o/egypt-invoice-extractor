@@ -20,13 +20,14 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 
+from invoice_extractor.eta_issue import RECEIVER_TYPES, UNIT_TYPES, VAT_KIND_LABELS, check_draft
 from invoice_extractor.extractors import ai_vision, ocr
 
 from . import charts, whatsapp
 from .config import Settings, load_settings
 from .db import Database
 from .exports import build_workbook
-from .services import (MINUTES_PER_INVOICE, InvoiceService, UploadError, current_period, filing_deadline,
+from .services import (MINUTES_PER_INVOICE, InvoiceService, IssueError, UploadError, current_period, filing_deadline,
                        invoice_question_text, reminder_text, valid_period, wa_link)
 
 log = logging.getLogger(__name__)
@@ -37,7 +38,22 @@ SOURCE_LABELS = {
     "pdf_text": "نص PDF", "ai_vision": "ذكاء اصطناعي", "ocr": "OCR مجاني", "eta_qr": "QR المنظومة",
     "eta_api": "المنظومة", "unknown": "غير معروف",
 }
-CHANNEL_LABELS = {"upload": "رفع", "whatsapp": "واتساب", "eta_sync": "المنظومة"}
+CHANNEL_LABELS = {"upload": "رفع", "whatsapp": "واتساب", "eta_sync": "المنظومة", "manual": "إدخال يدوي"}
+ETA_STATE_LABELS = {"submitted": "اتبعتت — مستنية رد المنظومة", "valid": "صادرة على المنظومة",
+                    "invalid": "المنظومة رفضتها", "rejected": "المنظومة رفضتها"}
+
+
+def missing_on_eta_text(client_name: str, office: str, invoices: list[dict]) -> str:
+    lines = [f"أهلًا {client_name}،",
+             "الفواتير دي من الموردين مش متسجلة على منظومة الفاتورة الإلكترونية، "
+             "فالضريبة اللي فيها ممكن متتخصمش من الإقرار:"]
+    for inv in invoices[:15]:
+        bits = [inv.get("supplier_name") or "مورد", f"فاتورة {inv['invoice_number']}" if inv.get("invoice_number") else "",
+                inv.get("invoice_date") or "", f"{inv['total']:,.2f} ج" if inv.get("total") is not None else ""]
+        lines.append("• " + " — ".join(b for b in bits if b))
+    lines.append("ياريت تطلب من كل مورد يصدر الفاتورة الإلكترونية على رقمك الضريبي.")
+    lines.append(f"شكرًا، {office}")
+    return "\n".join(lines)
 MONTHS_AR = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس",
              "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 
@@ -150,7 +166,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     env.filters["dmy"] = dmy
     env.filters["amount_input"] = amount_input
     env.globals.update(STATUS_LABELS=STATUS_LABELS, SOURCE_LABELS=SOURCE_LABELS,
-                       CHANNEL_LABELS=CHANNEL_LABELS)
+                       CHANNEL_LABELS=CHANNEL_LABELS, ETA_STATE_LABELS=ETA_STATE_LABELS,
+                       VAT_KIND_LABELS=VAT_KIND_LABELS, UNIT_TYPES=UNIT_TYPES, RECEIVER_TYPES=RECEIVER_TYPES)
 
     # ---------------------------------------------------------------- helpers
     def reader_status() -> dict:
@@ -499,8 +516,12 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         remind_url = wa_link(client["whatsapp_phone"], reminder_text(
             client["name"], request.state.user["name"], period_label(period),
             deadline["days_left"] if deadline["period"] == period else None, settings.whatsapp_display_number))
+        missing = service.missing_on_eta(client["id"], period)
+        missing_url = wa_link(client["whatsapp_phone"], missing_on_eta_text(
+            client["name"], request.state.user["name"], missing)) if missing else None
         return render(request, "client.html", client=client, invoices=invoices, period=period, nav="clients",
-                      remind_url=remind_url, q=q,
+                      remind_url=remind_url, q=q, missing=missing, missing_url=missing_url,
+                      profile=service.profile(client), can_issue=service.can_issue(client),
                       periods=recent_periods(db.periods(client["id"])), status=status, direction=direction,
                       summary=service.summary(client["id"], period))
 
@@ -611,14 +632,81 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         form = await form_with_csrf(request)
         period = valid_period(form.get("period"))
         result = await run_in_threadpool(service.sync_from_eta, client, period)
-        if result.imported or result.skipped:
-            flash(request, f"اتسحب {result.imported} فاتورة جديدة من المنظومة "
-                           f"(واتخطّى {result.skipped} موجودين أو ملغيين).", "success")
-        elif not result.errors:
+        if result.imported or result.skipped or result.matched:
+            msg = f"اتسحب {result.imported} فاتورة جديدة من المنظومة (واتخطّى {result.skipped} موجودين أو ملغيين)."
+            if result.matched:
+                msg += f" واتربطت {result.matched} فاتورة مرفوعة بنسختها الإلكترونية."
+            flash(request, msg, "success")
+        elif not result.errors and not result.missing:
             flash(request, "مفيش فواتير في المنظومة للشهر ده.", "info")
+        if result.missing and not result.errors:
+            flash(request, f"{result.missing} فاتورة مشتريات مش موجودة على المنظومة — ضريبتها "
+                           f"{money(result.missing_vat)} جنيه ممكن متتخصمش. شوفها تحت.", "error")
         for error in result.errors[:5]:
             flash(request, error, "error")
         return redirect(f"/clients/{client['id']}?period={period}")
+
+    @login_required
+    async def client_einvoice_settings(request: Request):
+        client = get_client_or_404(request, request.path_params["client_id"])
+        form = await form_with_csrf(request)
+        service.save_profile(client, form)
+        flash(request, "اتحفظت إعدادات الفاتورة الإلكترونية.", "success")
+        nxt = form.get("next") or ""
+        return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else f"/clients/{client['id']}#einvoice")
+
+    @login_required
+    async def client_new_sale(request: Request):
+        client = get_client_or_404(request, request.path_params["client_id"])
+        await form_with_csrf(request)
+        inv_id = service.new_sale(client)
+        return redirect(f"/invoices/{inv_id}/issue")
+
+    # ------------------------------------------------------ e-invoice issuing
+    @login_required
+    async def invoice_issue(request: Request):
+        invoice = get_invoice_or_404(request, request.path_params["invoice_id"])
+        client = db.get_client(invoice["client_id"])
+        if invoice["direction"] != "sale":
+            flash(request, "الفاتورة الإلكترونية للمشتريات بيصدرها المورد. تقدر تتأكد إنها موجودة على المنظومة "
+                           "بزرار «سحب من المنظومة» في صفحة العميل.", "info")
+            return redirect(f"/invoices/{invoice['id']}")
+        if request.method == "POST":
+            form = await form_with_csrf(request)
+            action = form.get("action", "save")
+            try:
+                if action == "refresh":
+                    invoice = await run_in_threadpool(service.refresh_issue, client, invoice)
+                    flash(request, ETA_STATE_LABELS.get(invoice.get("eta_state") or "", "اتحدثت الحالة."),
+                          "success" if invoice.get("eta_state") == "valid" else "info")
+                    return redirect(f"/invoices/{invoice['id']}/issue")
+                draft = service.draft_from_form(form)
+                service.save_draft(client, invoice, draft)
+                if action == "submit":
+                    invoice = await run_in_threadpool(service.issue, client, db.get_invoice(invoice["id"]),
+                                                      form.get("secret", ""))
+                    state = invoice.get("eta_state")
+                    if state == "valid":
+                        flash(request, "الفاتورة اتصدرت على المنظومة واتقبلت.", "success")
+                    elif state == "submitted":
+                        flash(request, "الفاتورة اتبعتت. المنظومة بتراجعها — حدّث الحالة بعد دقيقة.", "info")
+                    else:
+                        flash(request, "المنظومة رفضت الفاتورة — الأسباب مكتوبة تحت. صلّحها وابعت تاني.", "error")
+                else:
+                    flash(request, "اتحفظت الفاتورة.", "success")
+            except IssueError as exc:
+                for msg in exc.messages[:8]:
+                    flash(request, msg, "error")
+            return redirect(f"/invoices/{invoice['id']}/issue")
+        draft = service.draft_for(client, invoice)
+        profile = service.profile(client)
+        problems = check_draft(draft, service.issuer(client), profile)
+        line_amounts = [l.amounts() for l in draft.lines]
+        return render(request, "issue.html", invoice=invoice, client=client, draft=draft, profile=profile,
+                      issuer=service.issuer(client), problems=problems, totals=draft.totals(),
+                      line_amounts=line_amounts, can_issue=service.can_issue(client), nav="clients",
+                      locked=invoice.get("eta_state") in ("submitted", "valid"),
+                      has_file=bool(invoice.get("stored_path")))
 
     # --------------------------------------------------------------- invoice
     @login_required
@@ -799,6 +887,9 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         Route("/clients/{client_id:int}/approve", client_approve_bulk, methods=["POST"]),
         Route("/clients/{client_id:int}/report", client_report),
         Route("/clients/{client_id:int}/eta-sync", client_eta_sync, methods=["POST"]),
+        Route("/clients/{client_id:int}/einvoice-settings", client_einvoice_settings, methods=["POST"]),
+        Route("/clients/{client_id:int}/sales/new", client_new_sale, methods=["POST"]),
+        Route("/invoices/{invoice_id:int}/issue", invoice_issue, methods=["GET", "POST"]),
         Route("/invoices/{invoice_id:int}", invoice_detail),
         Route("/invoices/{invoice_id:int}/edit", invoice_update, methods=["POST"]),
         Route("/invoices/{invoice_id:int}/file", invoice_file),

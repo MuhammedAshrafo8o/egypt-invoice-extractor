@@ -5,6 +5,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -40,11 +41,18 @@ class Settings:
     whatsapp_app_secret: str
     whatsapp_api_version: str
     # Egyptian Tax Authority e-invoicing
-    eta_env: str  # "preprod" or "prod"
+    eta_env: str  # "preprod", "prod", or "demo" (local simulator, nothing is sent)
     # Day of the month after the tax period when the VAT return is due (0 = last day of that month)
     vat_deadline_day: int = 0
     # The business WhatsApp number clients send invoices to (shown in reminder messages)
     whatsapp_display_number: str = ""
+    # PKCS#11 library of the USB signing token (e.g. C:\\Windows\\System32\\eps2003csp11.dll)
+    eta_pkcs11_lib: str = ""
+    data_dir: Optional[Path] = None
+
+    @property
+    def eta_demo(self) -> bool:
+        return self.eta_env == "demo"
 
     @property
     def whatsapp_enabled(self) -> bool:
@@ -82,4 +90,6 @@ def load_settings() -> Settings:
         eta_env=os.environ.get("ETA_ENV", "preprod"),
         vat_deadline_day=int(os.environ.get("VAT_DEADLINE_DAY", "0") or 0),
         whatsapp_display_number=os.environ.get("WHATSAPP_DISPLAY_NUMBER", ""),
+        eta_pkcs11_lib=os.environ.get("ETA_PKCS11_LIB", ""),
+        data_dir=data_dir,
     )

@@ -52,8 +52,34 @@ def create_demo() -> None:
         if path.name.startswith("01_"):
             service.add_file(client, path.name, path.read_bytes())  # same invoice as a purchase
     _demo_history(db, uid)
+    _demo_einvoicing(db, service, client, seller)
     print("\n✅ اتعمل حساب تجريبي فيه عملاء وفواتير (و٥ شهور قبل كده عشان التحليلات):")
     print(f"   الإيميل: {email}\n   كلمة السر: {password}\n")
+
+
+def _demo_einvoicing(db, service, client, seller) -> None:
+    """E-invoice settings for two demo clients, and one ETA document 'received' by the Delta company
+    that matches an uploaded purchase (works when ETA_ENV=demo)."""
+    from invoice_extractor.eta_demo import DemoETAClient
+
+    for c, city, code in ((client, "الإسكندرية", "4690"), (seller, "القاهرة", "4761")):
+        service.save_profile(c, {"activity_code": code, "governate": city, "region_city": "وسط البلد",
+                                 "street": "شارع التحرير", "building_number": "12", "branch_id": "0",
+                                 "item_type": "EGS", "item_code": f"EG-{c['tax_id']}-1001", "unit_type": "EA",
+                                 "number_prefix": "INV-", "signer": "token"})
+    purchase = next((i for i in db.list_invoices(client["id"]) if (i["original_filename"] or "").startswith("01_")
+                     and i["direction"] == "purchase"), None)
+    if not purchase or not purchase["invoice_date"]:
+        return
+    DemoETAClient(store=service.demo_store).add_received({
+        "issuer": {"type": "B", "id": purchase["supplier_tax_id"], "name": purchase["supplier_name"]},
+        "receiver": {"type": "B", "id": client["tax_id"], "name": client["name"]},
+        "documentType": "I", "internalID": purchase["invoice_number"],
+        "dateTimeIssued": f"{purchase['invoice_date']}T09:00:00Z",
+        "netAmount": purchase["subtotal"], "totalAmount": purchase["total"],
+        "taxTotals": [{"taxType": "T1", "amount": purchase["vat_amount"]}],
+        "invoiceLines": [{"unitValue": {"currencySold": "EGP"}}],
+    })
 
 
 def _demo_history(db, uid: int) -> None:

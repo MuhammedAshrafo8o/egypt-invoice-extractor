@@ -14,6 +14,8 @@ python-multipart>=0.0.9
 itsdangerous>=2.1
 openpyxl>=3.1
 python-dotenv>=1.0
+cryptography>=42      # e-invoice signature (CAdES-BES)
+# PyKCS11>=1.5        # only to sign with a USB token: pip install PyKCS11
 
 # --- sample invoices (demo + tests) ---
 reportlab>=4.0

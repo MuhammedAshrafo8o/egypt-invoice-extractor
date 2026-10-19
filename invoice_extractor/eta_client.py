@@ -5,6 +5,8 @@ gets a client_id / client_secret. With those we can:
   * get a token            POST {identity}/connect/token  (client_credentials)
   * search documents       GET  {api}/api/v1.0/documents/search
   * get one document       GET  {api}/api/v1.0/documents/{uuid}/raw
+  * submit signed invoices POST {api}/api/v1/documentsubmissions
+  * document status        GET  {api}/api/v1.0/documents/{uuid}/details
 
 NOTE: endpoints and field names follow the public ETA SDK documentation. They have not
 been tested against live credentials in this repo yet — test on the pre-production
@@ -105,6 +107,33 @@ class ETAClient:
                 break
             params["continuationToken"] = token
 
+    def get_document_details(self, uuid: str) -> dict:
+        return self._get(f"/api/v1.0/documents/{uuid}/details")
+
+    def submit_documents(self, documents: list[dict]) -> dict:
+        """Submit signed documents. Returns the ETA response:
+        {"submissionId", "acceptedDocuments": [{"uuid", "longId", "internalId"}],
+         "rejectedDocuments": [{"internalId", "error": {...}}]}"""
+        response = self.session.post(
+            f"{self.urls['api']}/api/v1/documentsubmissions",
+            data=json.dumps({"documents": documents}, ensure_ascii=False).encode("utf-8"),
+            headers={"Authorization": f"Bearer {self.token()}", "Content-Type": "application/json",
+                     "Accept-Language": "ar"},
+            timeout=self.timeout,
+        )
+        if response.status_code in (200, 202):
+            return response.json()
+        if response.status_code == 422:
+            raise ETAError("المنظومة رفضت الإرسال لأن نفس الفاتورة اتبعتت من شوية — استنى دقايق وحدّث الحالة.")
+        if response.status_code == 400:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            return {"rejectedDocuments": [{"internalId": d.get("internalID"), "error": payload.get("error") or payload}
+                                          for d in documents]}
+        raise ETAError(f"ETA API error {response.status_code}: {response.text[:300]}")
+
     def fetch_fields(self, uuid: str) -> dict:
         """Convenience for invoice_extractor.process_file(eta_fetcher=...)."""
         return map_document(self.get_document(uuid))
@@ -163,3 +192,30 @@ def map_document(raw: dict) -> dict:
         "document_type": _first(raw.get("typeName"), doc.get("documentType")),
         "eta_status": raw.get("status"),
     }
+
+
+def error_messages(error) -> list[str]:
+    """Flatten an ETA error object ({message, details: [{message, propertyPath}]}) to lines."""
+    if not error:
+        return []
+    if isinstance(error, str):
+        return [error]
+    lines = []
+    details = error.get("details") or []
+    for d in details:
+        msg = d.get("message") or d.get("code") or ""
+        where = d.get("propertyPath") or d.get("target") or ""
+        lines.append(f"{msg} ({where})" if where else msg)
+    if not lines and error.get("message"):
+        lines.append(error["message"])
+    return [l for l in lines if l]
+
+
+def validation_messages(details: dict) -> list[str]:
+    """Failed validation steps from GET /documents/{uuid}/details."""
+    steps = ((details.get("validationResults") or {}).get("validationSteps")) or []
+    lines = []
+    for step in steps:
+        if str(step.get("status", "")).lower() == "invalid":
+            lines.extend(error_messages(step.get("error")) or [step.get("name") or "خطوة تحقق فشلت"])
+    return lines

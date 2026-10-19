@@ -1,0 +1,230 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}فاتورة إلكترونية {{ draft.internal_id }}{% endblock %}
+{% block content %}
+<nav class="crumbs">
+  <a href="/?period={{ invoice.period }}">الرئيسية</a> /
+  <a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /
+  فاتورة مبيعات إلكترونية
+</nav>
+
+<div class="page-head">
+  <div>
+    <h1>فاتورة مبيعات إلكترونية <bdi class="muted">{{ draft.internal_id }}</bdi></h1>
+    <p class="sub">من <strong>{{ issuer.name }}</strong>{% if issuer.id %} (<span class="num-text">{{ issuer.id }}</span>){% endif %}
+      {% if settings.eta_demo %}<span class="tag tag-warn">وضع تجربة: مش بتتبعت للمنظومة الحقيقية</span>{% endif %}</p>
+  </div>
+  <div class="head-actions">
+    {% if has_file %}<a class="btn" href="/invoices/{{ invoice.id }}/file" target="_blank" rel="noopener">{{ icon('external') }} الفاتورة الورق</a>{% endif %}
+    <a class="btn" href="/invoices/{{ invoice.id }}">تفاصيل الفاتورة</a>
+  </div>
+</div>
+
+{% if invoice.eta_state %}
+<section class="panel eta-status eta-{{ invoice.eta_state }}">
+  <div class="eta-status-main">
+    {% if invoice.eta_state == 'valid' %}<span class="stamp small-stamp">صادرة</span>{% endif %}
+    <div>
+      <strong>{{ ETA_STATE_LABELS.get(invoice.eta_state) }}</strong>
+      {% if invoice.eta_uuid %}<div class="muted small">رقم المنظومة (UUID): <span class="num-text" dir="ltr">{{ invoice.eta_uuid }}</span></div>{% endif %}
+    </div>
+  </div>
+  <div class="head-actions">
+    {% if invoice.eta_url %}<a class="btn" href="{{ invoice.eta_url }}" target="_blank" rel="noopener">{{ icon('external') }} افتحها على البوابة</a>{% endif %}
+    {% if invoice.eta_state == 'submitted' %}
+    <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="btn btn-primary" name="action" value="refresh">{{ icon('sync') }} حدّث الحالة</button></form>
+    {% endif %}
+  </div>
+  {% if invoice.eta_errors %}
+  <ul class="issues eta-errors">
+    {% for e in invoice.eta_errors %}<li class="issue issue-error"><bdi>{{ e }}</bdi></li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if not can_issue %}
+<div class="panel notice">
+  <strong>العميل لسه مش مربوط بالمنظومة.</strong>
+  <span class="muted">تقدر تكتب الفاتورة وتحفظها دلوقتي، وعشان تبعتها دخّل Client ID و Client Secret من <a href="/clients/{{ client.id }}#settings">بيانات العميل</a>.</span>
+</div>
+{% endif %}
+
+<form method="post" id="issue-form" class="issue-layout" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="issue-main{% if locked %} locked{% endif %}"><fieldset class="plain" {% if locked %}disabled{% endif %}>
+    <section class="panel">
+      <div class="panel-head"><h2>الفاتورة</h2></div>
+      <div class="grid-form panel-body">
+        <label>رقم الفاتورة<input name="internal_id" value="{{ draft.internal_id }}" dir="ltr" required></label>
+        <label>تاريخ الفاتورة<input type="date" name="issue_date" value="{{ draft.issue_date }}" required></label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>المشتري</h2></div>
+      <div class="panel-body">
+        <div class="seg" role="radiogroup" aria-label="نوع المشتري">
+          {% for code, label in RECEIVER_TYPES.items() %}
+          <label><input type="radio" name="receiver_type" value="{{ code }}" {% if draft.receiver.type == code %}checked{% endif %}><span>{{ label }}</span></label>
+          {% endfor %}
+        </div>
+        <div class="grid-form" style="margin-top:14px">
+          <label><span data-receiver-label="id">الرقم الضريبي</span><input name="receiver_id" value="{{ draft.receiver.id }}" class="num-input" dir="ltr"></label>
+          <label>الاسم<input name="receiver_name" value="{{ draft.receiver.name }}"></label>
+          <label>المحافظة<input name="receiver_governate" value="{{ draft.receiver.governate }}"></label>
+          <label>المدينة / الحي<input name="receiver_region_city" value="{{ draft.receiver.region_city }}"></label>
+          <label>الشارع<input name="receiver_street" value="{{ draft.receiver.street }}"></label>
+          <label>رقم المبنى<input name="receiver_building_number" value="{{ draft.receiver.building_number }}"></label>
+          <label data-only="F">كود الدولة<input name="receiver_country" value="{{ draft.receiver.country }}" dir="ltr" maxlength="2" placeholder="SA"></label>
+        </div>
+        <p class="muted small" data-only="P" style="margin-top:10px">للأفراد: الرقم القومي والعنوان مش مطلوبين إلا لو الفاتورة ٥٠ ألف جنيه أو أكتر.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>الأصناف</h2>
+        <span class="muted small">كود الصنف الافتراضي: <bdi dir="ltr">{{ profile.item_code or '—' }}</bdi> (<a href="/clients/{{ client.id }}#einvoice">تغيير</a>)</span></div>
+      <div class="table-wrap">
+      <table class="table lines-table" id="lines">
+        <thead><tr>
+          <th>الوصف</th><th>الوحدة</th><th class="num">الكمية</th><th class="num">سعر الوحدة</th>
+          <th class="num">خصم</th><th>الضريبة</th><th>كود الصنف</th><th class="num">الإجمالي</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for line in draft.lines %}
+          {% set a = line_amounts[loop.index0] %}
+          <tr class="line">
+            <td><input name="description" value="{{ line.description }}" placeholder="مثلًا: توريد مواسير"></td>
+            <td><select name="unit_type">{% for code, label in UNIT_TYPES.items() %}<option value="{{ code }}" {% if (line.unit_type or profile.unit_type) == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+            <td><input name="quantity" value="{{ line.quantity|amount_input }}" class="num-input" inputmode="decimal"></td>
+            <td><input name="unit_price" value="{{ line.unit_price|amount_input }}" class="num-input" inputmode="decimal"></td>
+            <td><input name="discount" value="{{ line.discount|amount_input if line.discount else '' }}" class="num-input" inputmode="decimal" placeholder="0"></td>
+            <td class="vat-cell"><select name="vat_kind">{% for k, label in VAT_KIND_LABELS.items() %}<option value="{{ k }}" {% if line.vat_kind == k %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+              <input name="vat_rate" value="{{ line.vat_rate|amount_input if line.vat_kind == 'other' else '' }}" class="num-input rate" inputmode="decimal" placeholder="٪"></td>
+            <td><input name="item_code" value="{{ line.item_code }}" dir="ltr" placeholder="{{ profile.item_code or 'EG-…' }}"></td>
+            <td class="num strong line-total">{{ a.total|money }}</td>
+            <td><button type="button" class="icon-btn remove-line" title="امسح الصنف" aria-label="امسح الصنف">×</button></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <div class="panel-foot"><button type="button" class="btn btn-small" id="add-line">{{ icon('plus') }} صنف كمان</button></div>
+    </section>
+  </fieldset></div>
+
+  <aside class="issue-side">
+    <section class="panel totals-card">
+      <h2>الإجماليات</h2>
+      <dl>
+        <dt>المبيعات</dt><dd class="num-text" data-total="sales">{{ totals.sales|money }}</dd>
+        <dt>الخصم</dt><dd class="num-text" data-total="discount">{{ totals.discount|money }}</dd>
+        <dt>الصافي</dt><dd class="num-text" data-total="net">{{ totals.net|money }}</dd>
+        <dt>ضريبة القيمة المضافة</dt><dd class="num-text" data-total="vat">{{ totals.vat|money }}</dd>
+        <dt class="grand">الإجمالي</dt><dd class="num-text grand" data-total="total">{{ totals.total|money }}</dd>
+      </dl>
+    </section>
+
+    {% if not locked %}
+    {% if problems %}
+    <section class="panel checklist">
+      <h2>قبل ما تبعت</h2>
+      <ul class="issues">{% for p in problems %}<li class="issue issue-warning">{{ p }}</li>{% endfor %}</ul>
+      <p class="muted small">بعد ما تعدّل، دوس «حفظ» عشان القايمة تتحدث.</p>
+    </section>
+    {% else %}
+    <section class="panel checklist ready"><h2>جاهزة للإرسال</h2>
+      <p class="muted small">البيانات كاملة. المنظومة هي اللي هتراجعها في الآخر.</p></section>
+    {% endif %}
+
+    <section class="panel send-card">
+      <button class="btn btn-block" type="submit" name="action" value="save">حفظ</button>
+      {% if can_issue %}
+      {% if not settings.eta_demo %}
+      <label>{% if profile.signer == 'pfx' %}كلمة سر ملف الشهادة{% else %}الرقم السري للتوكن (PIN){% endif %}
+        <input type="password" name="secret" autocomplete="off" dir="ltr"></label>
+      {% endif %}
+      <button class="btn btn-stamp btn-block" type="submit" name="action" value="submit"
+        data-confirm="الفاتورة هتتوقّع وتتبعت للمنظومة باسم {{ issuer.name }}. مش هينفع تتعدل بعد كده، ولو فيها غلط لازم تتلغي من البوابة.">
+        وقّع وابعت للمنظومة</button>
+      {% endif %}
+    </section>
+    {% endif %}
+  </aside>
+</form>
+
+<template id="line-template">
+  <tr class="line">
+    <td><input name="description" placeholder="مثلًا: توريد مواسير"></td>
+    <td><select name="unit_type">{% for code, label in UNIT_TYPES.items() %}<option value="{{ code }}" {% if profile.unit_type == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+    <td><input name="quantity" value="1" class="num-input" inputmode="decimal"></td>
+    <td><input name="unit_price" class="num-input" inputmode="decimal"></td>
+    <td><input name="discount" class="num-input" inputmode="decimal" placeholder="0"></td>
+    <td class="vat-cell"><select name="vat_kind">{% for k, label in VAT_KIND_LABELS.items() %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
+      <input name="vat_rate" class="num-input rate" inputmode="decimal" placeholder="٪"></td>
+    <td><input name="item_code" dir="ltr" placeholder="{{ profile.item_code or 'EG-…' }}"></td>
+    <td class="num strong line-total">0.00</td>
+    <td><button type="button" class="icon-btn remove-line" title="امسح الصنف" aria-label="امسح الصنف">×</button></td>
+  </tr>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var form = document.getElementById('issue-form');
+  var body = document.querySelector('#lines tbody');
+  var RATES = { standard: 14, exempt: 0, export: 0 };
+  function n(v) {
+    v = String(v || '').replace(/[٠-٩]/g, function (d) { return '٠١٢٣٤٥٦٧٨٩'.indexOf(d); }).replace(/[,،\s]/g, '');
+    var x = parseFloat(v); return isNaN(x) ? 0 : x;
+  }
+  function r5(x) { return Math.round(x * 1e5) / 1e5; }
+  function fmt(x) { return x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function recalc() {
+    var t = { sales: 0, discount: 0, net: 0, vat: 0, total: 0 };
+    body.querySelectorAll('tr.line').forEach(function (tr) {
+      var get = function (name) { return tr.querySelector('[name=' + name + ']'); };
+      var kind = get('vat_kind').value;
+      get('vat_rate').hidden = kind !== 'other';
+      var rate = kind === 'other' ? n(get('vat_rate').value) : RATES[kind];
+      var sales = r5(n(get('quantity').value) * n(get('unit_price').value));
+      var disc = r5(n(get('discount').value)), net = r5(sales - disc), vat = r5(net * rate / 100);
+      tr.querySelector('.line-total').textContent = fmt(net + vat);
+      t.sales += sales; t.discount += disc; t.net += net; t.vat += vat; t.total += net + vat;
+    });
+    Object.keys(t).forEach(function (k) {
+      var el = document.querySelector('[data-total=' + k + ']'); if (el) el.textContent = fmt(t[k]);
+    });
+  }
+  function receiverType() {
+    var checked = form.querySelector('[name=receiver_type]:checked');
+    var type = checked ? checked.value : 'B';
+    document.querySelectorAll('[data-only]').forEach(function (el) { el.hidden = el.getAttribute('data-only') !== type; });
+    var label = document.querySelector('[data-receiver-label=id]');
+    label.textContent = type === 'P' ? 'الرقم القومي' : type === 'F' ? 'الرقم الضريبي في بلده' : 'الرقم الضريبي';
+  }
+  form.addEventListener('input', recalc);
+  form.addEventListener('change', function (e) { recalc(); if (e.target.name === 'receiver_type') receiverType(); });
+  document.getElementById('add-line').addEventListener('click', function () {
+    body.appendChild(document.getElementById('line-template').content.cloneNode(true));
+    recalc(); body.querySelector('tr.line:last-child [name=description]').focus();
+  });
+  body.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('remove-line')) return;
+    if (body.querySelectorAll('tr.line').length > 1) e.target.closest('tr').remove(); recalc();
+  });
+  form.addEventListener('submit', function (e) {
+    var btn = e.submitter;
+    if (btn && btn.dataset.confirm && !confirm(btn.dataset.confirm)) { e.preventDefault(); return; }
+    if (btn && btn.value === 'submit') {
+      document.getElementById('busy-text').textContent = 'بيوقّع ويبعت للمنظومة…';
+      document.getElementById('busy').hidden = false;
+    }
+  });
+  receiverType(); recalc();
+})();
+</script>
+{% endblock %}

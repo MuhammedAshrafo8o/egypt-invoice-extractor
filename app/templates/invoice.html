@@ -43,7 +43,7 @@
         {% endif %}
       </div>
       {% else %}
-      <div class="empty"><p class="muted">الفاتورة دي اتسحبت من المنظومة، فمفيش ملف ليها.</p>
+      <div class="empty"><p class="muted">{% if invoice.channel == 'manual' %}الفاتورة دي اتكتبت في السيستم، فمفيش ملف ليها.{% else %}الفاتورة دي اتسحبت من المنظومة، فمفيش ملف ليها.{% endif %}</p>
         {% if invoice.eta_uuid %}<p class="small num-text">{{ invoice.eta_uuid }}</p>{% endif %}</div>
       {% endif %}
     </div>
@@ -67,6 +67,24 @@
         <li class="issue issue-{{ i.level }}">{{ i.message_ar or i.message }}</li>
       {% endfor %}
     </ul>
+    {% endif %}
+
+    {% if invoice.direction == 'sale' %}
+    <div class="eta-card eta-{{ invoice.eta_state or 'none' }}">
+      <div>
+        <strong>الفاتورة الإلكترونية</strong>
+        <div class="muted small">{% if invoice.eta_state %}{{ ETA_STATE_LABELS.get(invoice.eta_state) }}{% elif invoice.eta_uuid %}موجودة على المنظومة{% else %}لسه ماتصدرتش على المنظومة{% endif %}</div>
+      </div>
+      {% if invoice.eta_url %}<a class="btn btn-small" href="{{ invoice.eta_url }}" target="_blank" rel="noopener">{{ icon('external') }} على البوابة</a>{% endif %}
+      {% if not invoice.eta_uuid or invoice.eta_state in ('submitted', 'invalid', 'rejected') %}
+      <a class="btn btn-stamp btn-small" href="/invoices/{{ invoice.id }}/issue">{% if invoice.eta_state in ('invalid', 'rejected') %}صلّح وابعت تاني{% elif invoice.eta_state == 'submitted' %}تابع الحالة{% else %}إصدار فاتورة إلكترونية{% endif %}</a>
+      {% endif %}
+    </div>
+    {% elif invoice.eta_check == 'missing' %}
+    <div class="eta-card eta-invalid">
+      <div><strong>مش موجودة على منظومة الفاتورة الإلكترونية</strong>
+        <div class="muted small">آخر سحب من المنظومة مالقاش نسخة إلكترونية للفاتورة دي، فضريبتها ممكن متتخصمش. اطلب من المورد يصدرها على رقم العميل الضريبي.</div></div>
+    </div>
     {% endif %}
 
     <form method="post" action="/invoices/{{ invoice.id }}/edit" id="invoice-form">

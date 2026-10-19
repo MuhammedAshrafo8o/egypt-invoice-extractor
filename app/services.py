@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Optional
 
 from invoice_extractor import normalize
-from invoice_extractor.eta_client import ETAClient, ETAError, map_document, month_range
+from invoice_extractor.eta_client import (ETAClient, ETAError, error_messages, map_document, month_range,
+                                          validation_messages)
+from invoice_extractor.eta_demo import DemoETAClient
+from invoice_extractor.eta_issue import Draft, Line, Party, build_document, check_draft, document_hash_input, \
+    public_url
+from invoice_extractor.eta_signer import (PfxSigner, Pkcs11Signer, SigningError, check_certificate,
+                                          make_test_certificate, sign_document_bytes)
 from invoice_extractor.models import Invoice
 from invoice_extractor.pipeline import SUPPORTED_EXTS, clean_fields, process_file
 from invoice_extractor.validation import set_status, validate_invoice
@@ -19,6 +25,17 @@ from .config import Settings
 from .db import Database
 
 log = logging.getLogger(__name__)
+
+
+ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+
+class IssueError(ValueError):
+    """Problems issuing an e-invoice; .messages are Arabic lines to show."""
+
+    def __init__(self, messages: list[str]):
+        super().__init__("; ".join(messages))
+        self.messages = messages
 
 
 class UploadError(ValueError):
@@ -114,6 +131,9 @@ class SyncResult:
     imported: int = 0
     skipped: int = 0
     errors: list = None
+    matched: int = 0      # uploaded invoices linked to their ETA document
+    missing: int = 0      # purchases of the month with no ETA document
+    missing_vat: float = 0.0
 
     def __post_init__(self):
         self.errors = self.errors or []
@@ -127,10 +147,16 @@ class InvoiceService:
 
     # ------------------------------------------------------------ helpers
     def eta_client(self, client) -> Optional[ETAClient]:
+        if self.settings.eta_demo:
+            return DemoETAClient(store=self.demo_store, taxpayer=client["tax_id"] or "")
         if client["eta_client_id"] and client["eta_client_secret"]:
             return self.eta_client_factory(client["eta_client_id"], client["eta_client_secret"],
                                            env=self.settings.eta_env)
         return None
+
+    @property
+    def demo_store(self) -> Path:
+        return Path(self.settings.data_dir or self.settings.database_path.parent) / "eta_demo.json"
 
     @staticmethod
     def detect_direction(client, inv: Invoice) -> str:
@@ -145,6 +171,8 @@ class InvoiceService:
         self._apply_party_memory(client, inv)
         record = {name: getattr(inv, name) for name in Invoice.FIELDS}
         record.update(eta_uuid=inv.eta_uuid, eta_url=inv.eta_url, source_type=inv.source_type)
+        if inv.eta_uuid:
+            record["eta_check"] = "matched"
         duplicate = self.db.find_duplicate(client["id"], record, exclude_id=exclude_id)
         if duplicate:
             inv.add_issue("error", "duplicate", f"Duplicate of invoice #{duplicate['id']}.",
@@ -216,7 +244,7 @@ class InvoiceService:
 
     def process_stored(self, client, path: Path, original_filename: str, channel: str = "upload",
                        existing_id: Optional[int] = None) -> int:
-        eta = self.eta_client(client)
+        eta = None if self.settings.eta_demo else self.eta_client(client)
         inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr,
                            eta_fetcher=eta.fetch_fields if eta else None)
         inv.source_file = original_filename
@@ -295,9 +323,81 @@ class InvoiceService:
                 fields = map_document(summary)
                 result.errors.append(f"{doc_uuid}: {exc}")
             fields["eta_uuid"] = fields.get("eta_uuid") or doc_uuid
-            self.import_eta_fields(client, fields, period)
-            result.imported += 1
+            match = self.find_upload_match(client, fields)
+            if match:
+                self.merge_eta_into(client, match, fields)
+                result.matched += 1
+            else:
+                self.import_eta_fields(client, fields, period)
+                result.imported += 1
+        self.flag_missing_purchases(client, period, result)
         return result
+
+    # ------------------------------------------------- matching with the ETA
+    @staticmethod
+    def _same_number(a: Optional[str], b: Optional[str]) -> bool:
+        def key(v):
+            return "".join(ch for ch in str(v or "").translate(ARABIC_DIGITS).lower() if ch.isalnum()).lstrip("0")
+        return bool(key(a)) and key(a) == key(b)
+
+    def find_upload_match(self, client, fields: dict) -> Optional[dict]:
+        """An uploaded invoice that is the paper/PDF copy of this ETA document."""
+        supplier, buyer = fields.get("supplier_tax_id"), fields.get("buyer_tax_id")
+        total = fields.get("total")
+        try:
+            eta_day = date.fromisoformat(fields.get("invoice_date") or "")
+        except ValueError:
+            eta_day = None
+        best = None
+        for inv in self.db.purchases_for_matching(client["id"]):
+            if not supplier or inv.get("supplier_tax_id") != supplier:
+                continue
+            if any(x.get("code") == "duplicate" for x in inv["issues"]):
+                continue
+            if buyer and inv.get("buyer_tax_id") and inv["buyer_tax_id"] != buyer:
+                continue
+            if self._same_number(inv.get("invoice_number"), fields.get("invoice_number")):
+                return inv
+            try:
+                close_day = eta_day and abs((date.fromisoformat(inv.get("invoice_date") or "") - eta_day).days) <= 3
+            except ValueError:
+                close_day = False
+            if close_day and total is not None and inv.get("total") is not None and abs(inv["total"] - total) <= 1:
+                best = best or inv
+        return best
+
+    def merge_eta_into(self, client, invoice: dict, fields: dict) -> None:
+        """The ETA copy is the official one: take its numbers, keep the uploaded file."""
+        values = {k: invoice.get(k) for k in Invoice.FIELDS}
+        for name, value in clean_fields(fields).items():
+            if name in Invoice.FIELDS and value not in (None, ""):
+                values[name] = value
+        values.update(eta_uuid=fields.get("eta_uuid"), source_type=invoice.get("source_type"))
+        inv = validate_invoice(Invoice.from_fields(invoice.get("original_filename") or "", values))
+        record = self._finalize(client, inv, exclude_id=invoice["id"], direction=invoice["direction"])
+        record.update(eta_check="matched", approved=1 if inv.status != "error" else 0)
+        self.db.update_invoice(invoice["id"], record)
+        if record["approved"]:
+            self.remember_parties(client, record)
+
+    def flag_missing_purchases(self, client, period: str, result: Optional[SyncResult] = None) -> None:
+        """After a successful sync: purchases of the month with no ETA document are flagged."""
+        for inv in self.db.list_invoices(client["id"], period):
+            if inv["direction"] != "purchase" or inv["channel"] == "eta_sync":
+                continue
+            if any(x.get("code") == "duplicate" for x in inv["issues"]):
+                continue  # a second copy of another invoice: not a separate missing document
+            state = "matched" if inv.get("eta_uuid") else "missing"
+            if inv.get("eta_check") != state:
+                self.db.update_invoice(inv["id"], {"eta_check": state})
+            if state == "missing" and result is not None:
+                result.missing += 1
+                if inv["currency"] == "EGP" and (inv["status"] != "error" or inv["approved"]):
+                    result.missing_vat = round(result.missing_vat + (inv["vat_amount"] or 0), 2)
+
+    def missing_on_eta(self, client_id: int, period: str) -> list[dict]:
+        return [i for i in self.db.list_invoices(client_id, period)
+                if i["direction"] == "purchase" and i.get("eta_check") == "missing"]
 
     def import_eta_fields(self, client, fields: dict, period: Optional[str] = None) -> int:
         inv = Invoice(source_file=f"ETA {fields.get('eta_uuid')}")
@@ -313,6 +413,210 @@ class InvoiceService:
             record["approved"] = 1  # official record, no manual review needed
             self.remember_parties(client, record)
         return self.db.insert_invoice(client["id"], record)
+
+    # ------------------------------------------------- issuing e-invoices
+    PROFILE_KEYS = ("issuer_name", "activity_code", "branch_id", "governate", "region_city", "street",
+                    "building_number", "item_type", "item_code", "unit_type", "signer", "pfx_path", "number_prefix")
+
+    @staticmethod
+    def profile(client) -> dict:
+        try:
+            data = json.loads(client["eta_profile"] or "{}")
+        except (TypeError, ValueError, KeyError, IndexError):
+            data = {}
+        data.setdefault("item_type", "EGS")
+        data.setdefault("unit_type", "EA")
+        data.setdefault("branch_id", "0")
+        data.setdefault("signer", "token")
+        data.setdefault("number_prefix", "INV-")
+        return data
+
+    def save_profile(self, client, form: dict) -> None:
+        data = {k: (form.get(k) or "").strip() for k in self.PROFILE_KEYS}
+        data["item_type"] = data["item_type"].upper() if data["item_type"].upper() in ("EGS", "GS1") else "EGS"
+        data["signer"] = data["signer"] if data["signer"] in ("token", "pfx") else "token"
+        self.db.update_client(client["id"], eta_profile=data)
+
+    def issuer(self, client) -> Party:
+        p = self.profile(client)
+        return Party(type="B", id=client["tax_id"] or "", name=p.get("issuer_name") or client["name"],
+                     governate=p.get("governate", ""), region_city=p.get("region_city", ""),
+                     street=p.get("street", ""), building_number=p.get("building_number", ""),
+                     branch_id=p.get("branch_id") or "0")
+
+    def can_issue(self, client) -> bool:
+        """The ETA connection exists (or demo mode). Profile gaps are reported by check_draft."""
+        return self.settings.eta_demo or bool(client["eta_client_id"] and client["eta_client_secret"])
+
+    def new_sale(self, client) -> int:
+        today = date.today().isoformat()
+        prefix = self.profile(client).get("number_prefix") or "INV-"
+        draft = Draft(internal_id=self.db.next_internal_id(client["id"], prefix), issue_date=today,
+                      lines=[Line(description="", quantity=1, unit_price=0)])
+        return self.db.insert_invoice(client["id"], {
+            "direction": "sale", "status": "review", "channel": "manual", "source_type": "manual",
+            "original_filename": "فاتورة مبيعات جديدة", "period": period_for(today),
+            "supplier_name": self.issuer(client).name, "supplier_tax_id": client["tax_id"],
+            "invoice_number": draft.internal_id, "invoice_date": today,
+            "eta_draft": json.dumps(draft.to_dict(), ensure_ascii=False),
+        })
+
+    def draft_for(self, client, invoice: dict) -> Draft:
+        if invoice.get("eta_draft"):
+            return Draft.from_dict(json.loads(invoice["eta_draft"]))
+        # First time: start from what was read off the paper invoice.
+        receiver = Party(type="B", id=invoice.get("buyer_tax_id") or "", name=invoice.get("buyer_name") or "")
+        if receiver.id:
+            known = self.db.party_details(client["accountant_id"], receiver.id)
+            if known:
+                receiver = Party.from_dict({**known, "id": receiver.id, "name": receiver.name or known.get("name")})
+        elif not receiver.name:
+            receiver.type = "P"
+        sub, vat = invoice.get("subtotal"), invoice.get("vat_amount")
+        line = Line(description="", quantity=1, unit_price=float(sub or 0))
+        if sub and vat is not None:
+            rate = round(100 * vat / sub, 2) if sub else 14
+            if abs(rate - 14) < 0.2:
+                line.vat_kind = "standard"
+            elif abs(rate) < 0.01:
+                line.vat_kind = "exempt"
+            else:
+                line.vat_kind, line.vat_rate = "other", rate
+        return Draft(receiver=receiver, lines=[line], internal_id=invoice.get("invoice_number") or "",
+                     issue_date=invoice.get("invoice_date") or date.today().isoformat())
+
+    @staticmethod
+    def draft_from_form(form) -> Draft:
+        """Form fields: receiver_* and repeated line fields (description, quantity, ...)."""
+        get_list = form.getlist if hasattr(form, "getlist") else (lambda k: form.get(k) or [])
+        receiver = Party.from_dict({
+            "type": form.get("receiver_type") or "B",
+            "id": normalize.digits_only(form.get("receiver_id")) if (form.get("receiver_type") or "B") != "F"
+            else (form.get("receiver_id") or ""),
+            "name": form.get("receiver_name"), "governate": form.get("receiver_governate"),
+            "region_city": form.get("receiver_region_city"), "street": form.get("receiver_street"),
+            "building_number": form.get("receiver_building_number"),
+            "country": form.get("receiver_country") or "EG",
+        })
+        columns = ("description", "quantity", "unit_price", "discount", "vat_kind", "vat_rate", "unit_type",
+                   "item_code")
+        values = {c: list(get_list(c)) for c in columns}
+        lines = []
+        for n in range(len(values["description"])):
+            row = {c: (values[c][n] if n < len(values[c]) else "") for c in columns}
+            for c in ("quantity", "unit_price", "discount", "vat_rate"):
+                row[c] = normalize.parse_amount(row[c]) if row[c] not in ("", None) else None
+            if not (row["description"] or "").strip() and not row["unit_price"]:
+                continue  # empty row
+            lines.append(Line.from_dict(row))
+        return Draft(receiver=receiver, lines=lines, internal_id=(form.get("internal_id") or "").strip(),
+                     issue_date=normalize.parse_date(form.get("issue_date")) or "")
+
+    def save_draft(self, client, invoice: dict, draft: Draft) -> None:
+        if invoice.get("eta_state") in ("submitted", "valid"):
+            raise IssueError(["الفاتورة اتبعتت للمنظومة خلاص ومينفعش تتعدل. لو فيها غلط اعمل لها إلغاء من البوابة."])
+        totals = draft.totals()
+        issuer = self.issuer(client)
+        values = {
+            "supplier_name": issuer.name, "supplier_tax_id": client["tax_id"],
+            "buyer_name": draft.receiver.name or None, "buyer_tax_id": draft.receiver.id or None,
+            "invoice_number": draft.internal_id or None, "invoice_date": draft.issue_date or None,
+            "currency": "EGP", "subtotal": round(totals["net"], 2), "vat_amount": round(totals["vat"], 2),
+            "total": round(totals["total"], 2), "source_type": invoice.get("source_type"),
+        }
+        if totals["net"]:
+            values["vat_rate"] = round(totals["vat"] / totals["net"], 4)
+        inv = validate_invoice(Invoice.from_fields(invoice.get("original_filename") or "", values))
+        if draft.receiver.type in ("P", "F"):
+            # A person (national ID or none) or a foreign buyer has no Egyptian 9-digit tax ID.
+            inv.issues = [i for i in inv.issues if "buyer_tax_id" not in i.code]
+            set_status(inv)
+        record = self._finalize(client, inv, exclude_id=invoice["id"], direction="sale",
+                                period=period_for(draft.issue_date))
+        record.update(eta_draft=json.dumps(draft.to_dict(), ensure_ascii=False), eta_state=None, eta_message=None)
+        self.db.update_invoice(invoice["id"], record)
+        rec = draft.receiver
+        if rec.id and rec.type == "B":
+            self.db.save_party_details(client["accountant_id"], rec.id, rec.name,
+                                       {k: v for k, v in rec.to_dict().items() if k not in ("id", "name")})
+
+    def signer_for(self, client, secret: str):
+        profile = self.profile(client)
+        if self.settings.eta_demo and not (profile.get("signer") == "pfx" and profile.get("pfx_path")):
+            path = Path(self.settings.data_dir or self.settings.database_path.parent) / "demo-certs" / \
+                f"{client['tax_id']}.pfx"
+            if not path.exists():
+                make_test_certificate(path, client["tax_id"] or "000000000", client["name"])
+            return PfxSigner(path, "")
+        if profile.get("signer") == "pfx":
+            return PfxSigner(profile.get("pfx_path") or "", secret)
+        return Pkcs11Signer(self.settings.eta_pkcs11_lib, secret, client["tax_id"] or "")
+
+    def issue(self, client, invoice: dict, secret: str) -> dict:
+        """Sign and submit one sale invoice. Returns the updated invoice row. Raises IssueError."""
+        if invoice["direction"] != "sale":
+            raise IssueError(["الفاتورة دي مشتريات. الفاتورة الإلكترونية للمشتريات بيطلعها المورد مش احنا."])
+        if invoice.get("eta_state") in ("submitted", "valid"):
+            raise IssueError(["الفاتورة دي اتبعتت قبل كده."])
+        eta = self.eta_client(client)
+        if not eta:
+            raise IssueError(["العميل مش مربوط بالمنظومة — دخّل Client ID و Client Secret من بيانات العميل."])
+        draft = self.draft_for(client, invoice)
+        profile = self.profile(client)
+        problems = check_draft(draft, self.issuer(client), profile)
+        if problems:
+            raise IssueError(problems)
+        try:
+            signer = self.signer_for(client, secret)
+            cert_problems = check_certificate(signer.certificate(), client["tax_id"] or "")
+            if cert_problems and not self.settings.eta_demo:
+                raise IssueError(cert_problems)
+            document = build_document(draft, self.issuer(client), profile)
+            document["signatures"] = [{"signatureType": "I",
+                                       "value": sign_document_bytes(document_hash_input(document), signer)}]
+        except SigningError as exc:
+            raise IssueError([str(exc)])
+        try:
+            response = eta.submit_documents([document])
+        except Exception as exc:
+            raise IssueError([f"ماقدرناش نوصل للمنظومة: {exc}"])
+        accepted = response.get("acceptedDocuments") or []
+        if accepted:
+            doc = accepted[0]
+            self.db.update_invoice(invoice["id"], {
+                "eta_uuid": doc.get("uuid"), "eta_long_id": doc.get("longId"), "eta_state": "submitted",
+                "eta_message": None, "eta_url": public_url(self.settings.eta_env, doc.get("uuid"), doc.get("longId"))})
+            return self.refresh_issue(client, self.db.get_invoice(invoice["id"]))
+        rejected = response.get("rejectedDocuments") or [{}]
+        messages = error_messages(rejected[0].get("error")) or ["المنظومة رفضت الفاتورة من غير سبب واضح."]
+        self.db.update_invoice(invoice["id"], {"eta_state": "rejected",
+                                               "eta_message": json.dumps(messages, ensure_ascii=False)})
+        return self.db.get_invoice(invoice["id"])
+
+    def refresh_issue(self, client, invoice: dict) -> dict:
+        """Ask the ETA whether a submitted invoice became Valid or Invalid."""
+        if not invoice.get("eta_uuid") or invoice.get("eta_state") not in ("submitted", "valid", "invalid"):
+            return invoice
+        eta = self.eta_client(client)
+        try:
+            details = eta.get_document_details(invoice["eta_uuid"])
+        except Exception as exc:
+            log.warning("ETA details failed: %s", exc)
+            return invoice
+        status = str(details.get("status") or "").lower()
+        update = {}
+        if status == "valid":
+            update = {"eta_state": "valid", "eta_message": None, "approved": 1, "eta_check": "matched"}
+        elif status in ("invalid", "rejected", "cancelled"):
+            messages = validation_messages(details) or [f"حالة الفاتورة على المنظومة: {details.get('status')}"]
+            update = {"eta_state": "invalid", "eta_message": json.dumps(messages, ensure_ascii=False),
+                      "eta_uuid": None if status == "invalid" else invoice["eta_uuid"]}
+        long_id = details.get("longId") or invoice.get("eta_long_id")
+        if long_id and status == "valid":
+            update.update(eta_long_id=long_id, eta_url=public_url(self.settings.eta_env, invoice["eta_uuid"], long_id))
+        if update:
+            self.db.update_invoice(invoice["id"], update)
+        return self.db.get_invoice(invoice["id"])
 
     # -------------------------------------------------------------- summary
     def summary(self, client_id: int, period: str) -> dict:
@@ -339,4 +643,9 @@ class InvoiceService:
             "review_count": sum(1 for i in invoices if i["status"] == "review" and not i["approved"]),
             "error_count": sum(1 for i in invoices if i["status"] == "error" and not i["approved"]),
             "non_egp_count": sum(1 for i in invoices if i["currency"] != "EGP"),
+            "missing_on_eta": {
+                "count": sum(1 for i in counted if i["direction"] == "purchase" and i.get("eta_check") == "missing"),
+                "vat": round(sum(i["vat_amount"] or 0 for i in counted
+                                 if i["direction"] == "purchase" and i.get("eta_check") == "missing"), 2),
+            },
         }
