@@ -100,7 +100,7 @@ class AppTestCase(unittest.TestCase):
         subprocess.run([sys.executable, str(ROOT / "samples" / "make_samples.py")], check=True, capture_output=True)
         cls.tmp = Path(tempfile.mkdtemp())
         import os
-        os.environ.update(DATA_DIR=str(cls.tmp), USE_AI="false", WHATSAPP_APP_SECRET=APP_SECRET,
+        os.environ.update(DATA_DIR=str(cls.tmp), USE_AI="false", USE_OCR="false", WHATSAPP_APP_SECRET=APP_SECRET,
                           WHATSAPP_VERIFY_TOKEN=VERIFY_TOKEN, ALLOW_SIGNUP="true")
         os.environ.pop("ANTHROPIC_API_KEY", None)
         cls.settings = load_settings()

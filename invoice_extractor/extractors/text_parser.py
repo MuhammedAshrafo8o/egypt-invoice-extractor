@@ -28,7 +28,7 @@ SUBTOTAL_LABELS = (
     r"(?:الاجمالي قبل الضريبه|المبلغ قبل الضريبه|صافي المبلغ|صافي القيمه|المجموع الفرعي|الصافي|"
     r"sub\s*-?\s*total|net\s*(?:amount|total|value)|total\s*before\s*(?:tax|vat)|amount\s*before\s*(?:tax|vat)|total\s*excl\.?\s*vat)"
 )
-VAT_LABELS = r"(?:ضريبه القيمه المضافه|قيمه الضريبه|الضريبه|\bvat\b|value\s*added\s*tax|tax\s*amount)"
+VAT_LABELS = r"(?:ضريبه القيمه المضافه|القيمه المضافه|قيمه الضريبه|الضريبه|\bvat\b|value\s*added\s*tax|tax\s*amount)"
 GRAND_TOTAL_LABELS = (
     r"(?:الاجمالي شامل الضريبه|الاجمالي المستحق|المطلوب سداده|grand\s*total|amount\s*due|"
     r"total\s*(?:due|payable|incl\.?\s*(?:vat|tax)|including\s*(?:vat|tax)))"
@@ -39,7 +39,8 @@ TOTAL_LABELS = (
 )
 
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%|%\s*(\d+(?:\.\d+)?)")  # "14%" or "%14" (RTL)
+_MONEY = re.compile(r"\d[\d,]*\.\d{2}(?!\d)")
 _TAX_ID = re.compile(r"(?<!\d)(\d{3}[\s\-]?\d{3}[\s\-]?\d{3}|\d{14})(?!\d)")
 
 
@@ -59,6 +60,11 @@ def _value_after(label: str, line: str) -> Optional[str]:
 def _last_amount(line: str) -> Optional[float]:
     cleaned = _PERCENT.sub(" ", line)
     cleaned = re.sub(r"\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b", " ", cleaned)  # drop dates
+    # Prefer numbers that look like money (2 decimals): on OCR'd Arabic lines the value can come
+    # before the label, next to misread digits.
+    money = _MONEY.findall(cleaned)
+    if money:
+        return parse_amount(money[-1])
     numbers = _NUMBER.findall(cleaned)
     return parse_amount(numbers[-1]) if numbers else None
 
@@ -142,7 +148,7 @@ def parse_text(raw_text: str) -> dict:
         elif _has(VAT_LABELS, line) and not _has(TAX_ID_LABELS, line):
             pct = _PERCENT.search(line)
             if pct:
-                result.setdefault("vat_rate", round(float(pct.group(1)) / 100, 4))
+                result.setdefault("vat_rate", round(float(pct.group(1) or pct.group(2)) / 100, 4))
             amount = _last_amount(line)
             if amount is not None and "vat_amount" not in result:
                 result["vat_amount"] = amount

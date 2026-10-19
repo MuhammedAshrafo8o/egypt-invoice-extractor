@@ -167,24 +167,28 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class AIHttpTests(unittest.TestCase):
-    """Exercise the real HTTP call against a local fake of the Messages API."""
+AI_ENV_KEYS = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY",
+               "AI_PROVIDER", "ANTHROPIC_BASE_URL", "GEMINI_BASE_URL")
+FAKE_FIELDS = ('{"supplier_tax_id": "377-901-224", "invoice_date": "2026-10-10", "subtotal": 12500, '
+               '"vat_amount": 1750, "total": 14250, "invoice_number": "GB-3301", "confidence": 0.95}')
 
-    def test_request_format_and_parsing(self):
+
+class FakeAPIServer:
+    """Tiny local HTTP server standing in for an AI provider."""
+
+    def __init__(self, reply: dict):
         import json
-        import os
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
-        seen = {}
+        self.requests: list[dict] = []
+        outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
-                seen.update(headers={k.lower(): v for k, v in self.headers.items()}, body=body, path=self.path)
-                reply = {"content": [{"type": "text", "text": '```json\n{"supplier_tax_id": "377-901-224", '
-                                      '"invoice_date": "2026-10-10", "subtotal": 12500, "vat_amount": 1750, '
-                                      '"total": 14250, "invoice_number": "GB-3301", "confidence": 0.95}\n```'}]}
+                outer.requests.append({"path": self.path, "body": body,
+                                       "headers": {k.lower(): v for k, v in self.headers.items()}})
                 data = json.dumps(reply).encode()
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
@@ -195,20 +199,119 @@ class AIHttpTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = HTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        env = {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-               "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
-        with mock.patch.dict(os.environ, env):
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def ai_env(**values):
+    """Environment with only the given AI settings (others removed)."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k not in AI_ENV_KEYS}
+    env.update(NO_PROXY="127.0.0.1", no_proxy="127.0.0.1", **values)
+    return mock.patch.dict(os.environ, env, clear=True)
+
+
+class AIProviderTests(unittest.TestCase):
+    """Exercise the real HTTP calls against local fakes of each provider's API."""
+
+    def test_anthropic(self):
+        fake = FakeAPIServer({"content": [{"type": "text", "text": "```json\n" + FAKE_FIELDS + "\n```"}]})
+        with ai_env(ANTHROPIC_API_KEY="test-key", ANTHROPIC_BASE_URL=fake.url):
+            self.assertEqual(ai_vision.provider(), "anthropic")
             data = ai_vision.extract_with_ai(SAMPLES / "05_photo.jpg")
             pdf_data = ai_vision.extract_with_ai(SAMPLES / "06_scanned.pdf")
-        server.shutdown()
+        fake.close()
+        first, last = fake.requests
+        self.assertEqual(first["path"], "/v1/messages")
+        self.assertEqual(first["headers"]["x-api-key"], "test-key")
+        self.assertIn("anthropic-version", first["headers"])
+        self.assertEqual(first["body"]["messages"][0]["content"][0]["type"], "image")
+        self.assertEqual(last["body"]["messages"][0]["content"][0]["source"]["media_type"], "application/pdf")
+        self.assertEqual((data["total"], pdf_data["invoice_number"]), (14250, "GB-3301"))
 
-        self.assertEqual(seen["path"], "/v1/messages")
-        self.assertEqual(seen["headers"]["x-api-key"], "test-key")
-        self.assertIn("anthropic-version", seen["headers"])
-        content = seen["body"]["messages"][0]["content"]
-        self.assertEqual(content[0]["type"], "document")  # last call was the PDF
-        self.assertEqual(content[0]["source"]["media_type"], "application/pdf")
+    def test_gemini(self):
+        fake = FakeAPIServer({"candidates": [{"content": {"parts": [{"text": FAKE_FIELDS}]}}]})
+        with ai_env(GEMINI_API_KEY="g-key", GEMINI_BASE_URL=fake.url, GEMINI_MODEL="gemini-test"):
+            self.assertEqual(ai_vision.provider(), "gemini")
+            data = ai_vision.extract_with_ai(SAMPLES / "06_scanned.pdf")
+        fake.close()
+        req = fake.requests[0]
+        self.assertEqual(req["path"], "/models/gemini-test:generateContent")
+        self.assertEqual(req["headers"]["x-goog-api-key"], "g-key")
+        parts = req["body"]["contents"][0]["parts"]
+        self.assertEqual(parts[0]["inline_data"]["mime_type"], "application/pdf")
+        self.assertEqual(req["body"]["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(data["vat_amount"], 1750)
+
+    def test_openai_compatible_renders_pdf_to_image(self):
+        fake = FakeAPIServer({"choices": [{"message": {"content": FAKE_FIELDS}}]})
+        with ai_env(OPENAI_BASE_URL=fake.url + "/v1", OPENAI_MODEL="qwen2.5vl"):
+            self.assertEqual(ai_vision.provider(), "openai")
+            data = ai_vision.extract_with_ai(SAMPLES / "06_scanned.pdf")
+        fake.close()
+        req = fake.requests[0]
+        self.assertEqual(req["path"], "/v1/chat/completions")
+        self.assertNotIn("authorization", req["headers"])  # Ollama needs no key
+        content = req["body"]["messages"][0]["content"]
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
         self.assertEqual(data["total"], 14250)
-        self.assertEqual(pdf_data["invoice_number"], "GB-3301")
+
+    def test_provider_selection(self):
+        with ai_env():
+            self.assertIsNone(ai_vision.provider())
+        with ai_env(ANTHROPIC_API_KEY="a", GEMINI_API_KEY="g"):
+            self.assertEqual(ai_vision.provider(), "anthropic")
+        with ai_env(ANTHROPIC_API_KEY="a", GEMINI_API_KEY="g", AI_PROVIDER="gemini"):
+            self.assertEqual(ai_vision.provider(), "gemini")
+        with ai_env(AI_PROVIDER="gemini"):  # chosen but not configured
+            self.assertIsNone(ai_vision.provider())
+
+
+from invoice_extractor.extractors import ocr  # noqa: E402
+
+
+class OCRTests(unittest.TestCase):
+    def test_rtl_number_groups(self):
+        self.assertEqual(ocr.fix_rtl_number_groups("رقم التسجيل الضريبي:382-904-615"),
+                         "رقم التسجيل الضريبي:615-904-382")
+        self.assertEqual(ocr.fix_rtl_number_groups("Tax No: 382-904-615"), "Tax No: 382-904-615")
+        self.assertEqual(ocr.fix_rtl_number_groups("التاريخ:15/10/2026"), "التاريخ:15/10/2026")
+
+    @unittest.skipUnless(ocr.status() == "ok", "Tesseract with Arabic is not installed")
+    def test_photos_read_offline(self):
+        with ai_env():
+            invoices = {i.source_file: i for i in process_many(
+                [SAMPLES / "05_photo.jpg", SAMPLES / "09_arabic_photo.jpg"])}
+        en, ar = invoices["05_photo.jpg"], invoices["09_arabic_photo.jpg"]
+        self.assertEqual((en.supplier_tax_id, en.subtotal, en.vat_amount, en.total),
+                         ("377901224", 12500.0, 1750.0, 14250.0))
+        self.assertEqual((ar.supplier_tax_id, ar.invoice_number, ar.subtotal, ar.vat_amount, ar.total),
+                         ("615904382", "7781", 2300.0, 322.0, 2622.0))
+        for inv in (en, ar):
+            self.assertEqual(inv.source_type, "ocr")
+            self.assertEqual(inv.status, "review")  # OCR results always get a human look
+            self.assertIn("ocr_used", [i.code for i in inv.issues])
+
+    @unittest.skipUnless(ocr.status() == "ok", "Tesseract with Arabic is not installed")
+    def test_falls_back_to_ocr_when_ai_fails(self):
+        with ai_env(GEMINI_API_KEY="x"), mock.patch.object(
+                ai_vision, "extract_with_ai", side_effect=ai_vision.AIExtractionError("Rate limit reached")):
+            [inv] = process_many([SAMPLES / "06_scanned.pdf"])
+        codes = [i.code for i in inv.issues]
+        self.assertIn("ai_failed", codes)
+        self.assertEqual((inv.source_type, inv.total), ("ocr", 14250.0))
+
+    def test_nothing_available_message(self):
+        with ai_env(), mock.patch.object(ocr, "is_available", return_value=False):
+            [inv] = process_many([SAMPLES / "05_photo.jpg"])
+        self.assertIn("ai_unavailable", [i.code for i in inv.issues])
+        self.assertEqual(inv.status, "error")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -143,6 +143,27 @@ def main() -> None:
                 y -= 22 if i == 0 else 17
             c.save()
 
+        # 9. Phone photo of a printed Arabic invoice (properly joined Arabic needs Pillow with raqm).
+        from PIL import ImageFont, features
+
+        if features.check("raqm"):
+            photo = Image.new("RGB", (1000, 1150), (250, 249, 245))
+            draw = ImageDraw.Draw(photo)
+            big, small = ImageFont.truetype(font, 38), ImageFont.truetype(font, 30)
+            d4 = (today - timedelta(days=4)).strftime("%d/%m/%Y")
+            lines = [
+                "مؤسسة النور للأدوات المكتبية", "",
+                "رقم التسجيل الضريبي: 615-904-382", "فاتورة رقم: 7781", f"التاريخ: {d4}", "",
+                "الإجمالي قبل الضريبة: 2,300.00", "ضريبة القيمة المضافة 14%: 322.00",
+                "الإجمالي شامل الضريبة: 2,622.00",
+            ]
+            for i, line in enumerate(lines):
+                if line:
+                    draw.text((940, 90 + i * 85), line, fill=(25, 25, 25), font=big if i == 0 else small,
+                              anchor="ra", direction="rtl", language="ar")
+            photo = photo.rotate(-1.5, expand=True, fillcolor=(235, 233, 228), resample=Image.BICUBIC)
+            photo.save(OUT / "09_arabic_photo.jpg", quality=80)
+
     print(f"Wrote samples to {OUT}")
 
 

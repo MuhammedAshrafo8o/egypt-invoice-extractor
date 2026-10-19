@@ -10,3 +10,4 @@ samples/invoices/
 .DS_Store
 data/
 *.db
+tessdata/

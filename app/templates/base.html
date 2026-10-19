@@ -16,7 +16,8 @@
       <a href="/">العملاء</a>
     </nav>
     <div class="topbar-end">
-      {% if not ai_enabled %}<span class="pill pill-warn" title="ضيف ANTHROPIC_API_KEY في ملف .env">قراءة الصور مقفولة</span>{% endif %}
+      <span class="pill pill-{{ 'ok' if reader.kind == 'ai' else 'info' if reader.kind == 'ocr' else 'warn' }}"
+        title="الطريقة اللي بتتقري بيها الصور والـ PDF الممسوح — اتغيّر من ملف .env">{{ reader.label }}</span>
       <span class="muted">{{ user.name }}</span>
       <form method="post" action="/logout"><button class="link-btn" type="submit">خروج</button></form>
     </div>

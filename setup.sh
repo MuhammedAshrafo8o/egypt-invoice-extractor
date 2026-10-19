@@ -22,8 +22,16 @@ python -m pip install -r requirements.txt -q
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "▶ اتعمل ملف .env — ضيف فيه ANTHROPIC_API_KEY عشان قراءة الصور تشتغل"
+  echo "▶ اتعمل ملف .env — (اختياري) ضيف فيه مفتاح ذكاء اصطناعي لقراءة أدق"
 fi
+
+echo "▶ بيجهز القراءة المجانية (Tesseract OCR)…"
+if ! command -v tesseract >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then brew install tesseract || true
+  elif command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y tesseract-ocr || true
+  else echo "  سطّب Tesseract يدوي: https://tesseract-ocr.github.io/tessdoc/Installation.html"; fi
+fi
+python -m app setup-ocr || true
 
 echo "▶ بيجهز بيانات تجريبية…"
 python -m app demo

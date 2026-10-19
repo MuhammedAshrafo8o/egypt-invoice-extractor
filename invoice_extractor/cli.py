@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("inputs", nargs="+", help="Invoice files or folders")
     parser.add_argument("--out", default="results", help="Output folder (default: results)")
     parser.add_argument("--no-ai", action="store_true", help="Don't call the AI model for scanned files/photos")
+    parser.add_argument("--no-ocr", action="store_true", help="Don't use the free Tesseract OCR")
     parser.add_argument("--max-age-days", type=int, default=180, help="Flag invoices older than this")
     parser.add_argument("--raw-text", action="store_true", help="Include extracted PDF text in the JSON")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -62,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cfg = ValidationConfig(max_age_days=args.max_age_days)
-    invoices = process_many(files, use_ai=not args.no_ai, cfg=cfg)
+    invoices = process_many(files, use_ai=not args.no_ai, cfg=cfg, use_ocr=not args.no_ocr)
     summary = vat_summary(invoices)
 
     out = Path(args.out)

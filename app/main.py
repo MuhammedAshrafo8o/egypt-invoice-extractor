@@ -20,7 +20,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 
-from invoice_extractor.extractors import ai_vision
+from invoice_extractor.extractors import ai_vision, ocr
 
 from . import whatsapp
 from .config import Settings, load_settings
@@ -33,7 +33,7 @@ HERE = Path(__file__).parent
 
 STATUS_LABELS = {"ok": "سليمة", "review": "مراجعة", "error": "خطأ"}
 SOURCE_LABELS = {
-    "pdf_text": "نص PDF", "ai_vision": "ذكاء اصطناعي", "eta_qr": "QR المنظومة",
+    "pdf_text": "نص PDF", "ai_vision": "ذكاء اصطناعي", "ocr": "OCR مجاني", "eta_qr": "QR المنظومة",
     "eta_api": "المنظومة", "unknown": "غير معروف",
 }
 CHANNEL_LABELS = {"upload": "رفع", "whatsapp": "واتساب", "eta_sync": "المنظومة"}
@@ -87,6 +87,15 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                        CHANNEL_LABELS=CHANNEL_LABELS)
 
     # ---------------------------------------------------------------- helpers
+    def reader_status() -> dict:
+        """Which engine reads photos / scanned PDFs right now (shown in the top bar)."""
+        if settings.use_ai and ai_vision.is_available():
+            return {"kind": "ai", "label": f"القراءة: {ai_vision.provider_label()}"}
+        if settings.use_ocr and ocr.is_available():
+            label = "القراءة: OCR مجاني" if "ara" in ocr.available_languages() else "OCR بدون عربي"
+            return {"kind": "ocr", "label": label}
+        return {"kind": "off", "label": "قراءة الصور مقفولة"}
+
     def render(request: Request, name: str, status_code: int = 200, **ctx):
         session = request.session
         if "csrf" not in session:
@@ -95,7 +104,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         user = db.get_accountant(session["uid"]) if session.get("uid") else None
         return templates.TemplateResponse(request, name, {
             "user": user, "csrf": session["csrf"], "flashes": flashes,
-            "settings": settings, "ai_enabled": settings.use_ai and ai_vision.is_available(), **ctx,
+            "settings": settings, "reader": reader_status(), **ctx,
         }, status_code=status_code)
 
     def flash(request: Request, message: str, kind: str = "info") -> None:
@@ -429,7 +438,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         return JSONResponse({"received": len(messages)}, background=BackgroundTask(work))
 
     async def health(request: Request):
-        return JSONResponse({"status": "ok", "ai": ai_vision.is_available() and settings.use_ai,
+        return JSONResponse({"status": "ok", "ai": ai_vision.provider() if settings.use_ai else None,
+                             "ocr": ocr.status() if settings.use_ocr else "off",
                              "whatsapp": settings.whatsapp_enabled})
 
     async def not_found(request: Request, exc):

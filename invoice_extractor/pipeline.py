@@ -15,7 +15,7 @@ from typing import Callable
 from PIL import Image
 
 from . import normalize
-from .extractors import ai_vision, pdf_text, qr
+from .extractors import ai_vision, ocr, pdf_text, qr
 from .extractors.text_parser import parse_text
 from .models import Invoice
 from .validation import ValidationConfig, flag_duplicates, validate_invoice
@@ -60,18 +60,30 @@ def _missing_core(inv: Invoice) -> list[str]:
     return [f for f in CORE_FIELDS if getattr(inv, f) in (None, "")]
 
 
-def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str) -> None:
-    if not use_ai:
-        inv.add_issue("warning", "ai_disabled", f"{reason}; AI extraction is turned off.",
-                      f"{_REASON_AR.get(reason, reason)}؛ القراءة بالذكاء الاصطناعي مقفولة.")
+def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str, use_ocr: bool = True) -> None:
+    """Read an image / scanned PDF: AI model if configured, otherwise (or if it fails) free OCR."""
+    ai_done = False
+    if use_ai and ai_vision.is_available():
+        ai_done = _read_with_ai(inv, path)
+    if ai_done:
         return
-    if not ai_vision.is_available():
-        inv.add_issue("warning", "ai_unavailable", f"{reason}; set ANTHROPIC_API_KEY to read it with AI.",
-                      f"{_REASON_AR.get(reason, reason)}؛ ضيف ANTHROPIC_API_KEY عشان تتقري بالذكاء الاصطناعي.")
+    if use_ocr and ocr.is_available():
+        _read_with_ocr(inv, path)
         return
+    reason_ar = _REASON_AR.get(reason, reason)
+    if not use_ai and not use_ocr:
+        inv.add_issue("warning", "ai_disabled", f"{reason}; AI extraction and OCR are turned off.",
+                      f"{reason_ar}؛ القراءة الأوتوماتيك مقفولة.")
+    elif not any(i.code == "ai_failed" for i in inv.issues):
+        inv.add_issue("warning", "ai_unavailable",
+                      f"{reason}; install Tesseract (free) or set an AI key to read it.",
+                      f"{reason_ar}؛ سطّب Tesseract (مجاني) أو ضيف مفتاح ذكاء اصطناعي عشان تتقري.")
+
+
+def _read_with_ai(inv: Invoice, path: Path) -> bool:
     readable = path
     tmp = None
-    if path.suffix.lower() in {".bmp", ".tif", ".tiff"}:  # convert formats the API doesn't take
+    if path.suffix.lower() in {".bmp", ".tif", ".tiff"}:  # convert formats the APIs don't take
         tmp = Path(tempfile.mkstemp(suffix=".png")[1])
         Image.open(path).convert("RGB").save(tmp)
         readable = tmp
@@ -80,7 +92,7 @@ def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str) -> None:
     except ai_vision.AIExtractionError as exc:
         inv.add_issue("warning", "ai_failed", f"AI extraction failed: {exc}",
                       f"القراءة بالذكاء الاصطناعي فشلت: {exc}")
-        return
+        return False
     finally:
         if tmp and tmp.exists():
             tmp.unlink()
@@ -93,6 +105,23 @@ def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str) -> None:
     if isinstance(confidence, (int, float)) and confidence < 0.7:
         inv.add_issue("warning", "ai_low_confidence", f"AI confidence is low ({confidence:.0%}).",
                       f"ثقة القراءة ضعيفة ({confidence:.0%}) — راجع الأرقام.")
+    return True
+
+
+def _read_with_ocr(inv: Invoice, path: Path) -> None:
+    try:
+        text = ocr.ocr_file(path)
+    except ocr.OCRError as exc:
+        inv.add_issue("warning", "ocr_failed", f"OCR failed: {exc}", f"القراءة المجانية (OCR) فشلت: {exc}")
+        return
+    inv.raw_text = text
+    filled = inv.merge_missing(_clean(parse_text(text)))
+    if inv.source_type == "unknown":
+        inv.source_type = "ocr"
+    elif filled:
+        inv.source_type += "+ocr"
+    inv.add_issue("warning", "ocr_used", "Read with free OCR — check the numbers before approving.",
+                  "اتقرت بالقراءة المجانية (OCR) — راجع الأرقام، وخصوصًا الرقم الضريبي، قبل الاعتماد.")
 
 
 def apply_eta_data(inv: Invoice, data: dict) -> None:
@@ -105,7 +134,7 @@ def apply_eta_data(inv: Invoice, data: dict) -> None:
 
 
 def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | None = None,
-                 eta_fetcher: Callable[[str], dict] | None = None) -> Invoice:
+                 eta_fetcher: Callable[[str], dict] | None = None, use_ocr: bool = True) -> Invoice:
     """eta_fetcher(uuid) -> field dict; when given, e-invoices are pulled from the ETA API."""
     path = Path(path)
     inv = Invoice(source_file=path.name)
@@ -142,17 +171,17 @@ def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | 
             text = pdf_text.extract_pdf_text(path)
             inv.raw_text = text
             if pdf_text.is_scanned(text):
-                _apply_ai(inv, path, use_ai, "Scanned PDF (no text layer)")
+                _apply_ai(inv, path, use_ai, "Scanned PDF (no text layer)", use_ocr)
             else:
                 inv.merge_missing(_clean(parse_text(text)))
                 if inv.source_type == "unknown":
                     inv.source_type = "pdf_text"
                 missing = _missing_core(inv)
                 if missing and use_ai and ai_vision.is_available():
-                    _apply_ai(inv, path, use_ai, f"Text parser missed {', '.join(missing)}")
+                    _apply_ai(inv, path, use_ai, f"Text parser missed {', '.join(missing)}", use_ocr=False)
         # 3) Photo
         else:
-            _apply_ai(inv, path, use_ai, "Image invoice")
+            _apply_ai(inv, path, use_ai, "Image invoice", use_ocr)
     except Exception as exc:  # keep the batch running; report the file
         log.exception("Failed to process %s", path)
         inv.add_issue("error", "processing_failed", f"{type(exc).__name__}: {exc}",
@@ -165,8 +194,9 @@ def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | 
     return validate_invoice(inv, cfg)
 
 
-def process_many(paths, use_ai: bool = True, cfg: ValidationConfig | None = None) -> list[Invoice]:
-    invoices = [process_file(p, use_ai=use_ai, cfg=cfg) for p in paths]
+def process_many(paths, use_ai: bool = True, cfg: ValidationConfig | None = None,
+                 use_ocr: bool = True) -> list[Invoice]:
+    invoices = [process_file(p, use_ai=use_ai, cfg=cfg, use_ocr=use_ocr) for p in paths]
     flag_duplicates(invoices)
     return invoices
 

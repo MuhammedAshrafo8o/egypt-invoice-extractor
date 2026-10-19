@@ -31,6 +31,7 @@ class Settings:
     allow_signup: bool
     max_upload_mb: int
     use_ai: bool
+    use_ocr: bool
     https_only_cookies: bool
     # WhatsApp Cloud API
     whatsapp_verify_token: str
@@ -67,6 +68,7 @@ def load_settings() -> Settings:
         allow_signup=_bool("ALLOW_SIGNUP", True),
         max_upload_mb=int(os.environ.get("MAX_UPLOAD_MB", "15")),
         use_ai=_bool("USE_AI", True),
+        use_ocr=_bool("USE_OCR", True),
         https_only_cookies=_bool("HTTPS_ONLY_COOKIES", False),
         whatsapp_verify_token=os.environ.get("WHATSAPP_VERIFY_TOKEN", ""),
         whatsapp_access_token=os.environ.get("WHATSAPP_ACCESS_TOKEN", ""),

@@ -24,8 +24,19 @@ Write-Host "> Installing libraries..."
 
 if (-not (Test-Path ".env")) {
   Copy-Item ".env.example" ".env"
-  Write-Host "> Created .env - add ANTHROPIC_API_KEY to enable reading photos"
+  Write-Host "> Created .env - (optional) add an AI key for more accurate reading"
 }
+
+Write-Host "> Setting up free OCR (Tesseract)..."
+$tess = (Get-Command tesseract -ErrorAction SilentlyContinue) -or (Test-Path "C:\Program Files\Tesseract-OCR\tesseract.exe")
+if (-not $tess) {
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id UB-Mannheim.TesseractOCR -e --accept-source-agreements --accept-package-agreements
+  } else {
+    Write-Host "  Install Tesseract from https://github.com/UB-Mannheim/tesseract/wiki then run: .venv\Scripts\python -m app setup-ocr" -ForegroundColor Yellow
+  }
+}
+& $venvPy -m app setup-ocr
 
 Write-Host "> Creating demo data..."
 & $venvPy -m app demo

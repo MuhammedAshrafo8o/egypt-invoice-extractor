@@ -105,7 +105,7 @@ class InvoiceService:
     def process_stored(self, client, path: Path, original_filename: str, channel: str = "upload",
                        existing_id: Optional[int] = None) -> int:
         eta = self.eta_client(client)
-        inv = process_file(path, use_ai=self.settings.use_ai,
+        inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr,
                            eta_fetcher=eta.fetch_fields if eta else None)
         inv.source_file = original_filename
         record = self._finalize(client, inv, exclude_id=existing_id)
