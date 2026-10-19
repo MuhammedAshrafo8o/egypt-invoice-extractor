@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import random
+import re
 from pathlib import Path
 
 import cv2
@@ -100,6 +101,8 @@ class Hand:
 
 
 def printed(draw: ImageDraw.ImageDraw, xy, text, size, font, fill=PRINT_INK, anchor="ra"):
+    # Isolate hyphen-grouped numbers (tax IDs) so they display left-to-right, as printed invoices do.
+    text = re.sub(r"(\d+(?:-\d+)+)", "\u2066\\1\u2069", text)
     draw.text(xy, text, font=ImageFont.truetype(font, size), fill=fill, anchor=anchor,
               direction="rtl", language="ar")
 
