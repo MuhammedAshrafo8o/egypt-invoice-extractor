@@ -74,6 +74,21 @@ def _detect_currency(text: str) -> str:
     return "EGP"
 
 
+def _original_spelling(value: str, raw_text: str) -> str:
+    """Values are matched on normalized text (ة→ه …); return them as written in the invoice."""
+    for raw_line in raw_text.splitlines():
+        raw_line = re.sub(r"\s+", " ", raw_line).strip()
+        chars, index = [], []
+        for i, ch in enumerate(raw_line):
+            for c in normalize_text(ch):
+                chars.append(c)
+                index.append(i)
+        pos = "".join(chars).find(value)
+        if pos >= 0 and value:
+            return raw_line[index[pos]: index[pos + len(value) - 1] + 1]
+    return value
+
+
 def parse_text(raw_text: str) -> dict:
     text = normalize_text(raw_text)
     lines = [re.sub(r"\s+", " ", ln).strip() for ln in text.splitlines()]
@@ -159,4 +174,7 @@ def parse_text(raw_text: str) -> dict:
                 result["supplier_name"] = line
                 break
 
+    for key in ("supplier_name", "buyer_name"):
+        if result.get(key):
+            result[key] = _original_spelling(result[key], raw_text)
     return result

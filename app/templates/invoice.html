@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}فاتورة {{ invoice.invoice_number or invoice.id }}{% endblock %}
+{% block main_class %}container wide{% endblock %}
+{% block content %}
+<nav class="crumbs">
+  <a href="/?period={{ invoice.period }}">العملاء</a> /
+  <a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /
+  <span>فاتورة {{ invoice.invoice_number or ('#' ~ invoice.id) }}</span>
+</nav>
+
+<div class="review">
+  <section class="card preview">
+    {% if has_file %}
+      {% if is_pdf %}
+        <div class="pages">
+          {% for n in range(page_count) %}
+          <img src="/invoices/{{ invoice.id }}/page/{{ n }}.png" alt="صفحة {{ n + 1 }}" {% if n %}loading="lazy"{% endif %}>
+          {% endfor %}
+          <a class="small" href="/invoices/{{ invoice.id }}/file" target="_blank" rel="noopener">افتح الـ PDF الأصلي</a>
+        </div>
+      {% else %}
+        <a href="/invoices/{{ invoice.id }}/file" target="_blank" rel="noopener"><img src="/invoices/{{ invoice.id }}/file" alt="صورة الفاتورة"></a>
+      {% endif %}
+    {% else %}
+      <div class="empty"><p class="muted">الفاتورة دي اتسحبت من المنظومة، مفيش ملف ليها.</p>
+        {% if invoice.eta_uuid %}<p class="mono small" dir="ltr">{{ invoice.eta_uuid }}</p>{% endif %}</div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="review-head">
+      <div>
+        {% if invoice.approved %}<span class="chip chip-ok">معتمدة</span>
+        {% else %}<span class="chip chip-{{ invoice.status }}">{{ STATUS_LABELS[invoice.status] }}</span>{% endif %}
+        <span class="tag">{{ SOURCE_LABELS.get((invoice.source_type or 'unknown').split('+')[0], invoice.source_type) }}</span>
+        <span class="tag">{{ CHANNEL_LABELS.get(invoice.channel, invoice.channel) }}</span>
+      </div>
+      <span class="muted small"><bdi>{{ invoice.original_filename }}</bdi></span>
+    </div>
+
+    {% if invoice.issues %}
+    <ul class="issues">
+      {% for i in invoice.issues %}
+        <li class="issue issue-{{ i.level }}">{{ i.message_ar or i.message }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <form method="post" action="/invoices/{{ invoice.id }}/edit" class="grid-form" id="invoice-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if next_id %}<input type="hidden" name="next_id" value="{{ next_id }}">{% endif %}
+
+      <label>النوع
+        <select name="direction">
+          <option value="purchase" {% if invoice.direction == 'purchase' %}selected{% endif %}>مشتريات (ضريبة مدخلات)</option>
+          <option value="sale" {% if invoice.direction == 'sale' %}selected{% endif %}>مبيعات (ضريبة مخرجات)</option>
+        </select></label>
+      <label>تتحسب على شهر
+        <select name="period">
+          {% for p in periods %}<option value="{{ p }}" {% if p == invoice.period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+        </select></label>
+
+      <label>اسم المورد<input dir="auto" name="supplier_name" value="{{ invoice.supplier_name or '' }}"></label>
+      <label>الرقم الضريبي للمورد<input name="supplier_tax_id" value="{{ invoice.supplier_tax_id or '' }}" inputmode="numeric" class="mono"></label>
+      <label>اسم العميل (المشتري)<input dir="auto" name="buyer_name" value="{{ invoice.buyer_name or '' }}"></label>
+      <label>الرقم الضريبي للمشتري<input name="buyer_tax_id" value="{{ invoice.buyer_tax_id or '' }}" inputmode="numeric" class="mono"></label>
+      <label>رقم الفاتورة<input name="invoice_number" value="{{ invoice.invoice_number or '' }}" class="mono" dir="ltr"></label>
+      <label>التاريخ<input type="date" name="invoice_date" value="{{ invoice.invoice_date or '' }}"></label>
+
+      <label>المبلغ قبل الضريبة<input name="subtotal" value="{{ invoice.subtotal if invoice.subtotal is not none else '' }}" inputmode="decimal" class="mono amount" data-k="sub"></label>
+      <label>قيمة الضريبة<input name="vat_amount" value="{{ invoice.vat_amount if invoice.vat_amount is not none else '' }}" inputmode="decimal" class="mono amount" data-k="vat">
+        <small class="muted" id="rate-hint"></small></label>
+      <label>الإجمالي<input name="total" value="{{ invoice.total if invoice.total is not none else '' }}" inputmode="decimal" class="mono amount" data-k="total">
+        <small class="muted" id="sum-hint"></small></label>
+      <label>العملة<input name="currency" value="{{ invoice.currency or 'EGP' }}" maxlength="3" class="mono" dir="ltr"></label>
+
+      <div class="form-actions span-2">
+        <button class="btn btn-primary" type="submit" name="action" value="save_approve">حفظ واعتماد</button>
+        {% if next_id %}<button class="btn btn-primary" type="submit" name="action" value="save_next">اعتماد واللي بعدها ←</button>{% endif %}
+        <button class="btn" type="submit" name="action" value="save">حفظ بس</button>
+      </div>
+    </form>
+
+    <div class="secondary-actions">
+      {% if invoice.approved %}
+      <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link-btn" name="action" value="unapprove">إلغاء الاعتماد</button></form>
+      {% endif %}
+      {% if has_file %}
+      <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline" data-busy="بيقرا…"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link-btn" name="action" value="reprocess" type="submit">اقرا الملف من جديد</button></form>
+      {% endif %}
+      {% if invoice.eta_url %}<a class="link-btn" href="{{ invoice.eta_url }}" target="_blank" rel="noopener">افتح في المنظومة</a>{% endif %}
+      <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline" onsubmit="return confirm('تمسح الفاتورة دي؟')">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link-btn danger" name="action" value="delete" type="submit">مسح الفاتورة</button></form>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function num(el) { var v = parseFloat((el.value || '').replace(/,/g, '')); return isNaN(v) ? null : v; }
+  var f = document.getElementById('invoice-form');
+  var sub = f.querySelector('[data-k=sub]'), vat = f.querySelector('[data-k=vat]'), tot = f.querySelector('[data-k=total]');
+  var rateHint = document.getElementById('rate-hint'), sumHint = document.getElementById('sum-hint');
+  function update() {
+    var s = num(sub), v = num(vat), t = num(tot);
+    rateHint.textContent = (s && v !== null) ? 'النسبة ' + (v / s * 100).toFixed(2) + '٪' : '';
+    if (s !== null && v !== null && t !== null) {
+      var diff = t - (s + v);
+      sumHint.textContent = Math.abs(diff) <= 1 ? '✓ الإجمالي مظبوط' : 'الفرق ' + diff.toFixed(2);
+      sumHint.className = Math.abs(diff) <= 1 ? 'ok-text' : 'error-text';
+    } else { sumHint.textContent = ''; }
+  }
+  [sub, vat, tot].forEach(function (el) { el.addEventListener('input', update); });
+  update();
+  document.querySelectorAll('form[data-busy]').forEach(function (form) {
+    form.addEventListener('submit', function () {
+      var btn = form.querySelector('button[type=submit]');
+      if (btn) { setTimeout(function () { btn.disabled = true; btn.textContent = form.dataset.busy; }, 0); }
+    });
+  });
+})();
+</script>
+{% endblock %}

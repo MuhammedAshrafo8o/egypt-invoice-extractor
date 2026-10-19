@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-API_URL = "https://api.anthropic.com/v1/messages"
+API_URL = "https://api.anthropic.com/v1/messages"  # override base with ANTHROPIC_BASE_URL
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
 MEDIA_TYPES = {
@@ -83,8 +83,9 @@ def extract_with_ai(path: Path, model: str | None = None, timeout: int = 90) -> 
             "content": [_content_block(path), {"type": "text", "text": PROMPT}],
         }],
     }
+    base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
     request = urllib.request.Request(
-        API_URL,
+        f"{base}/v1/messages" if base else API_URL,
         data=json.dumps(body).encode("utf-8"),
         headers={
             "x-api-key": api_key,

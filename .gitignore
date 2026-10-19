@@ -8,3 +8,5 @@ results/
 samples/invoices/
 .pytest_cache/
 .DS_Store
+data/
+*.db

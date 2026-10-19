@@ -7,4 +7,4 @@ __all__ = [
     "Invoice", "Issue", "ValidationConfig",
     "process_file", "process_many", "validate_invoice", "vat_summary",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "egypt-invoice-extractor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Extract and validate data from Egyptian invoices (PDF and images) for VAT returns"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,13 +14,21 @@ dependencies = [
   "opencv-python-headless>=4.8",
   "numpy>=1.24",
   "Pillow>=10.0",
+  "requests>=2.31",
 ]
 
 [project.optional-dependencies]
 samples = ["reportlab>=4.0"]
+web = [
+  "starlette>=0.40", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multipart>=0.0.9",
+  "itsdangerous>=2.1", "openpyxl>=3.1", "python-dotenv>=1.0",
+]
 
 [project.scripts]
 invoice-extractor = "invoice_extractor.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["invoice_extractor*"]
+include = ["invoice_extractor*", "app*"]
+
+[tool.setuptools.package-data]
+app = ["templates/*.html", "static/*"]

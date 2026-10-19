@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}تسجيل الدخول{% endblock %}
+{% block main_class %}auth{% endblock %}
+{% block content %}
+<div class="auth-card">
+  <div class="auth-brand"><span class="brand-mark">د</span> دفتر</div>
+  <h1>تسجيل الدخول</h1>
+  <p class="muted">فواتير عملائك، مقروءة ومراجَعة وجاهزة للإقرار.</p>
+  <form method="post" class="stack">
+    <label>الإيميل<input type="email" name="email" value="{{ email or '' }}" required autofocus autocomplete="email"></label>
+    <label>كلمة السر<input type="password" name="password" required autocomplete="current-password"></label>
+    <button class="btn btn-primary btn-block" type="submit">دخول</button>
+  </form>
+  {% if settings.allow_signup %}<p class="auth-alt">مكتب جديد؟ <a href="/register">اعمل حساب</a></p>{% endif %}
+</div>
+{% endblock %}

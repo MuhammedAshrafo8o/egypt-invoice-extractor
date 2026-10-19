@@ -12,6 +12,7 @@ class Issue:
     level: str
     code: str
     message: str
+    message_ar: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -38,8 +39,8 @@ class Invoice:
     issues: list[Issue] = field(default_factory=list)
     status: str = "pending"  # ok | review | error
 
-    def add_issue(self, level: str, code: str, message: str) -> None:
-        self.issues.append(Issue(level, code, message))
+    def add_issue(self, level: str, code: str, message: str, message_ar: str = "") -> None:
+        self.issues.append(Issue(level, code, message, message_ar or message))
 
     def to_dict(self, include_raw_text: bool = False) -> dict:
         data = asdict(self)
@@ -54,6 +55,15 @@ class Invoice:
         "invoice_number", "invoice_date", "currency", "subtotal",
         "vat_amount", "vat_rate", "total",
     )
+
+    @classmethod
+    def from_fields(cls, source_file: str, data: dict) -> "Invoice":
+        """Build an invoice from stored/edited values (issues are recomputed by validation)."""
+        inv = cls(source_file=source_file)
+        for name in cls.FIELDS + ("source_type", "eta_uuid", "eta_url"):
+            if name in data and data[name] not in (None, ""):
+                setattr(inv, name, data[name])
+        return inv
 
     def merge_missing(self, other: dict) -> list[str]:
         """Fill fields that are still empty from another extraction result."""

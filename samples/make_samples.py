@@ -7,6 +7,7 @@ All companies, numbers and links are fictional.
 from __future__ import annotations
 
 import io
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from PIL import Image, ImageDraw
 from reportlab.lib.pagesizes import A5
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 OUT = Path(__file__).parent / "invoices"
 
@@ -109,7 +112,48 @@ def main() -> None:
     c.drawImage(ImageReader(io.BytesIO(buf.getvalue())), 20, 20, A5[0] - 40, A5[1] - 40)
     c.save()
 
+    # 7 & 8. Arabic invoices: normal text order, and "visual order" (how many Arabic PDFs
+    # store text, so extraction comes out reversed — the extractor repairs it).
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    font = _arabic_font()
+    if font:
+        pdfmetrics.registerFont(TTFont("Arabic", font))
+        d3 = (today - timedelta(days=8)).strftime("%d/%m/%Y")
+        arabic = [
+            "شركة الأهرام للتوريدات الهندسية",
+            "رقم التسجيل الضريبي: 488-201-736",
+            "فاتورة رقم: 2026/311",
+            f"تاريخ الفاتورة: {d3}",
+            "اسم العميل: شركة الدلتا للتجارة",
+            "الرقم الضريبي للعميل: 300-112-455",
+            "الإجمالي قبل الضريبة: 4,800.00",
+            "ضريبة القيمة المضافة 14%: 672.00",
+            "الإجمالي شامل الضريبة: 5,472.00 جنيه",
+        ]
+        from invoice_extractor.extractors.pdf_text import fix_reversed_line
+
+        for name, transform in (("07_arabic.pdf", lambda t: t), ("08_arabic_visual_order.pdf", fix_reversed_line)):
+            c = canvas.Canvas(str(OUT / name), pagesize=A5)
+            y = A5[1] - 50
+            for i, line in enumerate(arabic):
+                c.setFont("Arabic", 13 if i == 0 else 10)
+                c.drawRightString(A5[0] - 40, y, transform(line))
+                y -= 22 if i == 0 else 17
+            c.save()
+
     print(f"Wrote samples to {OUT}")
+
+
+def _arabic_font() -> str | None:
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+    return next((c for c in candidates if Path(c).exists()), None)
 
 
 if __name__ == "__main__":

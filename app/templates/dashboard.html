@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}العملاء{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>العملاء</h1>
+    <p class="muted">ملخص {{ period|period_label }}</p>
+  </div>
+  <form method="get" class="inline">
+    <select name="period" onchange="this.form.submit()" aria-label="الشهر">
+      {% for p in periods %}<option value="{{ p }}" {% if p == period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+    </select>
+  </form>
+</div>
+
+<section class="stats">
+  <div class="stat"><span class="stat-label">العملاء</span><span class="stat-value">{{ totals.clients }}</span></div>
+  <div class="stat"><span class="stat-label">فواتير الشهر</span><span class="stat-value">{{ totals.invoices }}</span></div>
+  <div class="stat stat-warn"><span class="stat-label">محتاجة مراجعة</span><span class="stat-value">{{ totals.reviews }}</span></div>
+  <div class="stat stat-error"><span class="stat-label">فيها أخطاء</span><span class="stat-value">{{ totals.errors }}</span></div>
+</section>
+
+<section class="card">
+  {% if clients %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr>
+      <th>العميل</th><th>الرقم الضريبي</th><th class="num">فواتير</th><th class="num">للمراجعة</th>
+      <th class="num">ضريبة المخرجات</th><th class="num">ضريبة المدخلات</th><th class="num">الصافي</th>
+    </tr></thead>
+    <tbody>
+    {% for c in clients %}
+      {% set net = (c.output_vat or 0) - (c.input_vat or 0) %}
+      <tr class="row-link" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
+        <td><a href="/clients/{{ c.id }}?period={{ period }}" class="strong">{{ c.name }}</a>
+          {% if c.whatsapp_phone %}<span class="tag" title="واتساب {{ c.whatsapp_phone }}">واتساب</span>{% endif %}
+          {% if c.eta_client_id %}<span class="tag">المنظومة</span>{% endif %}</td>
+        <td class="mono">{{ c.tax_id or '—' }}</td>
+        <td class="num">{{ c.invoice_count or 0 }}</td>
+        <td class="num">
+          {% if c.error_count %}<span class="chip chip-error">{{ c.error_count }} خطأ</span>{% endif %}
+          {% if c.review_count %}<span class="chip chip-review">{{ c.review_count }}</span>{% endif %}
+          {% if not c.error_count and not c.review_count %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="num mono">{{ c.output_vat|money }}</td>
+        <td class="num mono">{{ c.input_vat|money }}</td>
+        <td class="num mono strong {% if net < 0 %}neg{% endif %}">{{ net|money }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <h2>لسه مفيش عملاء</h2>
+    <p class="muted">ضيف أول عميل، وبعدين ارفع فواتيره أو خليه يبعتها على الواتساب.</p>
+  </div>
+  {% endif %}
+</section>
+
+<details class="card collapsible" {% if not clients %}open{% endif %}>
+  <summary><span class="btn btn-primary">+ عميل جديد</span></summary>
+  <form method="post" action="/clients" class="grid-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>اسم العميل<input name="name" required placeholder="شركة الدلتا للتجارة"></label>
+    <label>الرقم الضريبي<input name="tax_id" inputmode="numeric" placeholder="٩ أرقام"></label>
+    <label>رقم الواتساب<input name="whatsapp_phone" inputmode="tel" placeholder="01001234567">
+      <small class="muted">الفواتير اللي توصل من الرقم ده تتسجل للعميل ده</small></label>
+    <label>ملاحظات<input name="notes"></label>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">إضافة</button></div>
+  </form>
+</details>
+{% endblock %}

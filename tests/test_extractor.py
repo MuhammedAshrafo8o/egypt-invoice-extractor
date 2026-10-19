@@ -57,7 +57,8 @@ class ArabicParserTests(unittest.TestCase):
         self.assertEqual(r["vat_amount"], 1400.0)
         self.assertEqual(r["vat_rate"], 0.14)
         self.assertEqual(r["total"], 11400.0)
-        self.assertEqual(r["supplier_name"], "شركه النيل للتوريدات")
+        self.assertEqual(r["supplier_name"], "شركة النيل للتوريدات")
+        self.assertEqual(r["buyer_name"], "شركة الدلتا للتجارة")
         self.assertEqual(r["currency"], "EGP")
 
     def test_total_incl_vat_is_not_read_as_vat(self):
@@ -164,3 +165,50 @@ class PipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AIHttpTests(unittest.TestCase):
+    """Exercise the real HTTP call against a local fake of the Messages API."""
+
+    def test_request_format_and_parsing(self):
+        import json
+        import os
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        seen = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+                seen.update(headers={k.lower(): v for k, v in self.headers.items()}, body=body, path=self.path)
+                reply = {"content": [{"type": "text", "text": '```json\n{"supplier_tax_id": "377-901-224", '
+                                      '"invoice_date": "2026-10-10", "subtotal": 12500, "vat_amount": 1750, '
+                                      '"total": 14250, "invoice_number": "GB-3301", "confidence": 0.95}\n```'}]}
+                data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        env = {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+               "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+        with mock.patch.dict(os.environ, env):
+            data = ai_vision.extract_with_ai(SAMPLES / "05_photo.jpg")
+            pdf_data = ai_vision.extract_with_ai(SAMPLES / "06_scanned.pdf")
+        server.shutdown()
+
+        self.assertEqual(seen["path"], "/v1/messages")
+        self.assertEqual(seen["headers"]["x-api-key"], "test-key")
+        self.assertIn("anthropic-version", seen["headers"])
+        content = seen["body"]["messages"][0]["content"]
+        self.assertEqual(content[0]["type"], "document")  # last call was the PDF
+        self.assertEqual(content[0]["source"]["media_type"], "application/pdf")
+        self.assertEqual(data["total"], 14250)
+        self.assertEqual(pdf_data["invoice_number"], "GB-3301")

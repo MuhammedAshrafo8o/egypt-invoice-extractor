@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }}{% endblock %}
+{% block content %}
+<nav class="crumbs"><a href="/?period={{ period }}">العملاء</a> / <span>{{ client.name }}</span></nav>
+
+<div class="page-head">
+  <div>
+    <h1>{{ client.name }}</h1>
+    <p class="muted">
+      {% if client.tax_id %}رقم ضريبي <span class="mono">{{ client.tax_id }}</span>{% else %}<a href="#settings">ضيف الرقم الضريبي</a> عشان نفرّق بين المبيعات والمشتريات{% endif %}
+      {% if client.whatsapp_phone %} · واتساب <span class="mono" dir="ltr">+{{ client.whatsapp_phone }}</span>{% endif %}
+    </p>
+  </div>
+  <div class="head-actions">
+    <form method="get" class="inline">
+      <select name="period" onchange="this.form.submit()" aria-label="الشهر">
+        {% for p in periods %}<option value="{{ p }}" {% if p == period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+      </select>
+    </form>
+    {% if client.eta_client_id %}
+    <form method="post" action="/clients/{{ client.id }}/eta-sync" class="inline" data-busy="بيسحب من المنظومة…">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="period" value="{{ period }}">
+      <button class="btn" type="submit">سحب من المنظومة</button>
+    </form>
+    {% endif %}
+    <a class="btn" href="/clients/{{ client.id }}/export.xlsx?period={{ period }}">تصدير Excel</a>
+  </div>
+</div>
+
+<section class="stats">
+  <div class="stat"><span class="stat-label">ضريبة المخرجات (مبيعات)</span><span class="stat-value mono">{{ summary.sales.vat|money }}</span>
+    <span class="stat-sub">{{ summary.sales.count }} فاتورة · {{ summary.sales.subtotal|money }} قبل الضريبة</span></div>
+  <div class="stat"><span class="stat-label">ضريبة المدخلات (مشتريات)</span><span class="stat-value mono">{{ summary.purchases.vat|money }}</span>
+    <span class="stat-sub">{{ summary.purchases.count }} فاتورة · {{ summary.purchases.subtotal|money }} قبل الضريبة</span></div>
+  <div class="stat stat-accent"><span class="stat-label">صافي الضريبة {% if summary.net_vat >= 0 %}(مستحق){% else %}(رصيد دائن){% endif %}</span>
+    <span class="stat-value mono">{{ summary.net_vat|money }}</span>
+    <span class="stat-sub">من الفواتير السليمة والمعتمدة بس</span></div>
+  <div class="stat {% if summary.error_count %}stat-error{% elif summary.review_count %}stat-warn{% endif %}">
+    <span class="stat-label">لسه محتاجة شغل</span>
+    <span class="stat-value">{{ summary.error_count + summary.review_count }}</span>
+    <span class="stat-sub">{{ summary.error_count }} خطأ · {{ summary.review_count }} مراجعة</span></div>
+</section>
+
+<section class="card">
+  <form method="post" action="/clients/{{ client.id }}/upload" enctype="multipart/form-data" class="dropzone" id="dropzone" data-busy="بيقرا الفواتير… ممكن ياخد شوية لو فيه صور">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="period" value="{{ period }}">
+    <input type="file" name="files" id="files" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff" hidden>
+    <div class="dz-inner">
+      <div><strong>اسحب الفواتير هنا</strong> أو <label for="files" class="link-btn">اختار ملفات</label></div>
+      <div class="muted">PDF أو صور — ممكن أكتر من ملف مرة واحدة</div>
+      <div id="dz-files" class="muted"></div>
+    </div>
+    <button class="btn btn-primary" type="submit" id="dz-submit" hidden>ارفع واقرا</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="toolbar">
+    <div class="tabs">
+      {% set base = '/clients/' ~ client.id ~ '?period=' ~ period ~ ('&direction=' ~ direction if direction else '') %}
+      <a href="{{ base }}" class="tab {% if not status %}active{% endif %}">الكل</a>
+      <a href="{{ base }}&status=pending" class="tab {% if status == 'pending' %}active{% endif %}">محتاجة شغل</a>
+      <a href="{{ base }}&status=error" class="tab {% if status == 'error' %}active{% endif %}">أخطاء</a>
+      <a href="{{ base }}&status=review" class="tab {% if status == 'review' %}active{% endif %}">مراجعة</a>
+      <a href="{{ base }}&status=ok" class="tab {% if status == 'ok' %}active{% endif %}">سليمة / معتمدة</a>
+    </div>
+    <div class="tabs">
+      {% set base2 = '/clients/' ~ client.id ~ '?period=' ~ period ~ ('&status=' ~ status if status else '') %}
+      <a href="{{ base2 }}" class="tab {% if not direction %}active{% endif %}">الكل</a>
+      <a href="{{ base2 }}&direction=purchase" class="tab {% if direction == 'purchase' %}active{% endif %}">مشتريات</a>
+      <a href="{{ base2 }}&direction=sale" class="tab {% if direction == 'sale' %}active{% endif %}">مبيعات</a>
+    </div>
+  </div>
+
+  {% if invoices %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr>
+      <th>الحالة</th><th>التاريخ</th><th>الطرف الآخر</th><th>رقم الفاتورة</th><th>النوع</th>
+      <th class="num">قبل الضريبة</th><th class="num">الضريبة</th><th class="num">الإجمالي</th><th>المصدر</th>
+    </tr></thead>
+    <tbody>
+    {% for inv in invoices %}
+      {% set other = inv.buyer_name if inv.direction == 'sale' else inv.supplier_name %}
+      <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}'">
+        <td>{% if inv.approved %}<span class="chip chip-ok">معتمدة</span>
+            {% else %}<span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span>{% endif %}</td>
+        <td class="mono">{{ inv.invoice_date or '—' }}</td>
+        <td><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
+          {% if inv.issues and not inv.approved %}<div class="row-note">{{ (inv.issues[0].message_ar or inv.issues[0].message)|truncate(70) }}</div>{% endif %}</td>
+        <td class="mono">{{ inv.invoice_number or '—' }}</td>
+        <td>{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</td>
+        <td class="num mono">{{ inv.subtotal|money }}</td>
+        <td class="num mono">{{ inv.vat_amount|money }}</td>
+        <td class="num mono strong">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
+        <td><span class="tag">{{ CHANNEL_LABELS.get(inv.channel, inv.channel) }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="empty"><p class="muted">مفيش فواتير هنا لـ {{ period|period_label }}.</p></div>
+  {% endif %}
+</section>
+
+<details class="card collapsible" id="settings">
+  <summary><span class="btn">بيانات العميل والربط</span></summary>
+  <form method="post" action="/clients/{{ client.id }}/edit" class="grid-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>اسم العميل<input name="name" value="{{ client.name }}" required></label>
+    <label>الرقم الضريبي<input name="tax_id" value="{{ client.tax_id or '' }}" inputmode="numeric"></label>
+    <label>رقم الواتساب<input name="whatsapp_phone" value="{{ client.whatsapp_phone or '' }}" inputmode="tel" dir="ltr"></label>
+    <label>ملاحظات<input name="notes" value="{{ client.notes or '' }}"></label>
+    <fieldset class="span-2">
+      <legend>ربط منظومة الفاتورة الإلكترونية</legend>
+      <p class="muted small">من بوابة المنظومة: ERP System ← Client ID و Client Secret الخاصين بالعميل. بيتستخدموا لسحب الفواتير الإلكترونية بالظبط بدل قراءتها من الصورة.</p>
+      <div class="grid-form inner">
+        <label>Client ID<input name="eta_client_id" value="{{ client.eta_client_id or '' }}" dir="ltr" autocomplete="off"></label>
+        <label>Client Secret<input name="eta_client_secret" type="password" dir="ltr" autocomplete="new-password"
+          placeholder="{{ 'محفوظ — اكتب جديد للتغيير' if client.eta_client_secret else '' }}"></label>
+        {% if client.eta_client_id %}<label class="check"><input type="checkbox" name="clear_eta" value="1"> امسح بيانات الربط</label>{% endif %}
+      </div>
+    </fieldset>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">حفظ</button></div>
+  </form>
+  <form method="post" action="/clients/{{ client.id }}/edit" class="danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="delete">
+    <strong>مسح العميل</strong>
+    <p class="muted small">هيتمسح العميل وكل فواتيره. اكتب اسمه بالظبط للتأكيد.</p>
+    <div class="inline">
+      <input name="confirm_name" placeholder="{{ client.name }}">
+      <button class="btn btn-danger" type="submit">مسح نهائي</button>
+    </div>
+  </form>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var zone = document.getElementById('dropzone');
+  var input = document.getElementById('files');
+  var list = document.getElementById('dz-files');
+  var submit = document.getElementById('dz-submit');
+  function show() {
+    var names = Array.prototype.map.call(input.files, function (f) { return f.name; });
+    list.textContent = names.length ? names.length + ' ملف: ' + names.join('، ') : '';
+    submit.hidden = !names.length;
+  }
+  input.addEventListener('change', show);
+  ['dragenter', 'dragover'].forEach(function (e) {
+    zone.addEventListener(e, function (ev) { ev.preventDefault(); zone.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (e) {
+    zone.addEventListener(e, function (ev) { ev.preventDefault(); zone.classList.remove('over'); });
+  });
+  zone.addEventListener('drop', function (ev) { input.files = ev.dataTransfer.files; show(); });
+  document.querySelectorAll('form[data-busy]').forEach(function (form) {
+    form.addEventListener('submit', function () {
+      var btn = form.querySelector('button[type=submit]');
+      if (btn) { btn.disabled = true; btn.textContent = form.dataset.busy; }
+    });
+  });
+})();
+</script>
+{% endblock %}

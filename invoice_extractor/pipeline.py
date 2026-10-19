@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image
 
@@ -24,6 +25,10 @@ log = logging.getLogger(__name__)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 SUPPORTED_EXTS = IMAGE_EXTS | {".pdf"}
 CORE_FIELDS = ("supplier_tax_id", "invoice_date", "total", "vat_amount")
+_REASON_AR = {
+    "Image invoice": "صورة فاتورة",
+    "Scanned PDF (no text layer)": "PDF ممسوح ضوئيًا (مفيهوش نص)",
+}
 
 
 def _clean(data: dict) -> dict:
@@ -48,16 +53,21 @@ def _clean(data: dict) -> dict:
     return out
 
 
+clean_fields = _clean  # public name
+
+
 def _missing_core(inv: Invoice) -> list[str]:
     return [f for f in CORE_FIELDS if getattr(inv, f) in (None, "")]
 
 
 def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str) -> None:
     if not use_ai:
-        inv.add_issue("warning", "ai_disabled", f"{reason}; AI extraction is turned off.")
+        inv.add_issue("warning", "ai_disabled", f"{reason}; AI extraction is turned off.",
+                      f"{_REASON_AR.get(reason, reason)}؛ القراءة بالذكاء الاصطناعي مقفولة.")
         return
     if not ai_vision.is_available():
-        inv.add_issue("warning", "ai_unavailable", f"{reason}; set ANTHROPIC_API_KEY to read it with AI.")
+        inv.add_issue("warning", "ai_unavailable", f"{reason}; set ANTHROPIC_API_KEY to read it with AI.",
+                      f"{_REASON_AR.get(reason, reason)}؛ ضيف ANTHROPIC_API_KEY عشان تتقري بالذكاء الاصطناعي.")
         return
     readable = path
     tmp = None
@@ -68,7 +78,8 @@ def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str) -> None:
     try:
         data = ai_vision.extract_with_ai(readable)
     except ai_vision.AIExtractionError as exc:
-        inv.add_issue("warning", "ai_failed", f"AI extraction failed: {exc}")
+        inv.add_issue("warning", "ai_failed", f"AI extraction failed: {exc}",
+                      f"القراءة بالذكاء الاصطناعي فشلت: {exc}")
         return
     finally:
         if tmp and tmp.exists():
@@ -80,16 +91,29 @@ def _apply_ai(inv: Invoice, path: Path, use_ai: bool, reason: str) -> None:
     elif filled:
         inv.source_type += "+ai_vision"
     if isinstance(confidence, (int, float)) and confidence < 0.7:
-        inv.add_issue("warning", "ai_low_confidence", f"AI confidence is low ({confidence:.0%}).")
+        inv.add_issue("warning", "ai_low_confidence", f"AI confidence is low ({confidence:.0%}).",
+                      f"ثقة القراءة ضعيفة ({confidence:.0%}) — راجع الأرقام.")
 
 
-def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | None = None) -> Invoice:
+def apply_eta_data(inv: Invoice, data: dict) -> None:
+    """ETA data is the official record, so it overrides whatever was read from the file."""
+    for name, value in _clean(data).items():
+        if name in Invoice.FIELDS and value not in (None, ""):
+            setattr(inv, name, value)
+    inv.eta_uuid = data.get("eta_uuid") or inv.eta_uuid
+    inv.source_type = "eta_api"
+
+
+def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | None = None,
+                 eta_fetcher: Callable[[str], dict] | None = None) -> Invoice:
+    """eta_fetcher(uuid) -> field dict; when given, e-invoices are pulled from the ETA API."""
     path = Path(path)
     inv = Invoice(source_file=path.name)
     ext = path.suffix.lower()
 
     if ext not in SUPPORTED_EXTS:
-        inv.add_issue("error", "unsupported_file", f"Unsupported file type '{ext}'.")
+        inv.add_issue("error", "unsupported_file", f"Unsupported file type '{ext}'.",
+                      f"نوع الملف '{ext}' مش مدعوم.")
         inv.status = "error"
         return inv
 
@@ -104,8 +128,17 @@ def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | 
                 inv.source_type = "eta_qr"
                 break
 
+        if inv.eta_uuid and eta_fetcher:
+            try:
+                apply_eta_data(inv, eta_fetcher(inv.eta_uuid))
+            except Exception as exc:  # fall back to reading the file
+                inv.add_issue("warning", "eta_fetch_failed", f"Could not fetch from ETA: {exc}",
+                              f"ماقدرناش نسحب الفاتورة من المنظومة: {exc}")
+
         # 2) Digital PDF text
-        if ext == ".pdf":
+        if inv.source_type == "eta_api":
+            pass
+        elif ext == ".pdf":
             text = pdf_text.extract_pdf_text(path)
             inv.raw_text = text
             if pdf_text.is_scanned(text):
@@ -122,11 +155,13 @@ def process_file(path: str | Path, use_ai: bool = True, cfg: ValidationConfig | 
             _apply_ai(inv, path, use_ai, "Image invoice")
     except Exception as exc:  # keep the batch running; report the file
         log.exception("Failed to process %s", path)
-        inv.add_issue("error", "processing_failed", f"{type(exc).__name__}: {exc}")
+        inv.add_issue("error", "processing_failed", f"{type(exc).__name__}: {exc}",
+                      f"حصل خطأ أثناء قراءة الملف: {exc}")
 
-    if inv.eta_uuid:
+    if inv.eta_uuid and inv.source_type != "eta_api":
         inv.add_issue("warning", "eta_document",
-                      "Official e-invoice — pull the exact data from the ETA API to skip manual review.")
+                      "Official e-invoice — pull the exact data from the ETA API to skip manual review.",
+                      "فاتورة إلكترونية رسمية — اربط حساب المنظومة عشان بياناتها تتسحب بالظبط.")
     return validate_invoice(inv, cfg)
 
 

@@ -1,7 +1,19 @@
+# --- invoice extraction ---
 pdfplumber>=0.11
 pypdfium2>=4.0
 opencv-python-headless>=4.8
 numpy>=1.24
 Pillow>=10.0
-# only needed to generate the sample invoices
+requests>=2.31
+
+# --- web dashboard ---
+starlette>=0.40
+uvicorn[standard]>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+itsdangerous>=2.1
+openpyxl>=3.1
+python-dotenv>=1.0
+
+# --- sample invoices (demo + tests) ---
 reportlab>=4.0
