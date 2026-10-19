@@ -270,6 +270,24 @@ class Database:
         with self.connect() as conn:
             return [_invoice_dict(r) for r in conn.execute(sql, args).fetchall()]
 
+    def pending_invoices(self, accountant_id: int, limit: int = 500) -> list[dict]:
+        """Every invoice that still needs the accountant, across all clients (the review queue)."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT i.*, c.name AS client_name FROM invoices i JOIN clients c ON c.id = i.client_id
+                WHERE c.accountant_id = ? AND i.approved = 0 AND i.status != 'ok'
+                ORDER BY c.name, CASE i.status WHEN 'error' THEN 0 ELSE 1 END, i.id
+                LIMIT ?
+                """, (accountant_id, limit)).fetchall()
+        return [_invoice_dict(r) for r in rows]
+
+    def pending_count(self, accountant_id: int) -> int:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM invoices i JOIN clients c ON c.id = i.client_id "
+                "WHERE c.accountant_id = ? AND i.approved = 0 AND i.status != 'ok'", (accountant_id,)).fetchone()[0]
+
     def find_duplicate(self, client_id: int, invoice: dict, exclude_id: Optional[int] = None) -> Optional[dict]:
         """Same invoice already stored for this client (by ETA UUID or supplier + number)."""
         clauses, args = [], []

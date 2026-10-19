@@ -1,10 +1,11 @@
 {% extends "base.html" %}
-{% block title %}العملاء{% endblock %}
+{% from "_icons.html" import icon %}
+{% block title %}الرئيسية{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>العملاء</h1>
-    <p class="muted">ملخص {{ period|period_label }}</p>
+    <h1>أهلًا، {{ user.name }}</h1>
+    <p class="sub">ملخص فواتير {{ period|period_label }} لكل عملاءك.</p>
   </div>
   <form method="get" class="inline">
     <select name="period" onchange="this.form.submit()" aria-label="الشهر">
@@ -13,61 +14,114 @@
   </form>
 </div>
 
-<section class="stats">
-  <div class="stat"><span class="stat-label">العملاء</span><span class="stat-value">{{ totals.clients }}</span></div>
-  <div class="stat"><span class="stat-label">فواتير الشهر</span><span class="stat-value">{{ totals.invoices }}</span></div>
-  <div class="stat stat-warn"><span class="stat-label">محتاجة مراجعة</span><span class="stat-value">{{ totals.reviews }}</span></div>
-  <div class="stat stat-error"><span class="stat-label">فيها أخطاء</span><span class="stat-value">{{ totals.errors }}</span></div>
+{% if clients %}
+<section class="today">
+  <div class="today-main {% if not pending_total %}clear{% endif %}">
+    {% if pending_total %}
+      <p class="big">عندك <b>{{ pending_total }} فاتورة</b> محتاجة مراجعة قبل ما الإقرارات تبقى جاهزة.</p>
+      <p class="muted">بتراجع اللي فيه مشكلة أو محتاج نظرة بس. الباقي اتقرا واتراجع لوحده.</p>
+      <div><a class="btn btn-stamp" href="/review">{{ icon('review') }} ابدأ المراجعة</a></div>
+    {% else %}
+      <p class="big"><b>مفيش حاجة مستنياك.</b> كل الفواتير اتراجعت.</p>
+      <p class="muted">ارفع فواتير جديدة من صفحة أي عميل، أو استنى اللي هيوصل على الواتساب.</p>
+    {% endif %}
+  </div>
+  <div class="today-side">
+    <div class="fact deadline">
+      <span class="label">آخر ميعاد لإقرار {{ deadline.period|period_label }}</span>
+      <span class="value {% if deadline.days_left <= 5 %}soon{% endif %}">
+        {% if deadline.days_left == 0 %}النهارده{% elif deadline.days_left == 1 %}بكرة{% else %}باقي {{ deadline.days_left }} يوم{% endif %}
+      </span>
+    </div>
+    <div class="fact"><span class="label">عملاء جاهزين للإقرار</span><span class="value">{{ totals.ready }} من {{ totals.clients }}</span></div>
+    <div class="fact"><span class="label">فواتير {{ period|period_label }}</span><span class="value">{{ totals.invoices }}</span></div>
+    <div class="fact"><span class="label">صافي الضريبة لكل العملاء</span><span class="value num-text">{{ totals.net_vat|money }}</span></div>
+  </div>
 </section>
+{% endif %}
 
-<section class="card">
+<section class="panel" id="clients">
+  <div class="panel-head">
+    <h2>العملاء</h2>
+    <div class="head-actions">
+      {% if clients|length > 5 %}
+      <label class="search" aria-label="بحث">{{ icon('search') }}<input type="search" id="client-search" placeholder="دوّر باسم العميل أو الرقم الضريبي"></label>
+      {% endif %}
+      <a class="btn btn-primary" href="#new-client" onclick="document.getElementById('new-client').open = true">{{ icon('plus') }} عميل جديد</a>
+    </div>
+  </div>
   {% if clients %}
   <div class="table-wrap">
-  <table class="table">
+  <table class="table" id="clients-table">
     <thead><tr>
-      <th>العميل</th><th>الرقم الضريبي</th><th class="num">فواتير</th><th class="num">للمراجعة</th>
+      <th>العميل</th><th>إقرار {{ period|period_label }}</th><th>محتاج مراجعة</th>
       <th class="num">ضريبة المخرجات</th><th class="num">ضريبة المدخلات</th><th class="num">الصافي</th>
     </tr></thead>
     <tbody>
     {% for c in clients %}
-      {% set net = (c.output_vat or 0) - (c.input_vat or 0) %}
-      <tr class="row-link" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
+      <tr class="row-link" data-search="{{ c.name }} {{ c.tax_id or '' }}" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
         <td><a href="/clients/{{ c.id }}?period={{ period }}" class="strong">{{ c.name }}</a>
-          {% if c.whatsapp_phone %}<span class="tag" title="واتساب {{ c.whatsapp_phone }}">واتساب</span>{% endif %}
-          {% if c.eta_client_id %}<span class="tag">المنظومة</span>{% endif %}</td>
-        <td class="mono">{{ c.tax_id or '—' }}</td>
-        <td class="num">{{ c.invoice_count or 0 }}</td>
-        <td class="num">
-          {% if c.error_count %}<span class="chip chip-error">{{ c.error_count }} خطأ</span>{% endif %}
-          {% if c.review_count %}<span class="chip chip-review">{{ c.review_count }}</span>{% endif %}
-          {% if not c.error_count and not c.review_count %}<span class="muted">—</span>{% endif %}
+          <div class="row-note">{% if c.tax_id %}<span class="num-text">{{ c.tax_id }}</span>{% else %}من غير رقم ضريبي{% endif %}
+            {% if c.whatsapp_phone %}<span class="tag">واتساب</span>{% endif %}{% if c.eta_client_id %}<span class="tag">مربوط بالمنظومة</span>{% endif %}</div></td>
+        <td>
+          {% if c.ready %}
+            <span class="stamp" title="كل فواتير الشهر اتراجعت">جاهز<br>للإقرار</span>
+          {% elif c.invoice_count %}
+            <div class="progress"><span class="bar"><i style="width: {{ (100 * c.done / c.invoice_count)|round|int }}%"></i></span>
+              <span class="count">{{ c.done }} من {{ c.invoice_count }}</span></div>
+          {% else %}<span class="muted small">لسه مفيش فواتير</span>{% endif %}
         </td>
-        <td class="num mono">{{ c.output_vat|money }}</td>
-        <td class="num mono">{{ c.input_vat|money }}</td>
-        <td class="num mono strong {% if net < 0 %}neg{% endif %}">{{ net|money }}</td>
+        <td>
+          {% if c.error_count %}<span class="chip chip-error">{{ c.error_count }} خطأ</span>{% endif %}
+          {% if c.review_count %}<span class="chip chip-review">{{ c.review_count }} مراجعة</span>{% endif %}
+          {% if not c.pending %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="num">{{ c.output_vat|money }}</td>
+        <td class="num">{{ c.input_vat|money }}</td>
+        <td class="num strong">{{ c.net_vat|money }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
+  <p class="empty muted" id="no-match" hidden>مفيش عميل بالاسم ده.</p>
   {% else %}
   <div class="empty">
-    <h2>لسه مفيش عملاء</h2>
-    <p class="muted">ضيف أول عميل، وبعدين ارفع فواتيره أو خليه يبعتها على الواتساب.</p>
+    <h2>ابدأ بإضافة أول عميل</h2>
+    <p class="muted">اكتب اسمه ورقمه الضريبي، وبعدين ارفع فواتيره أو خليه يبعتها على الواتساب.</p>
   </div>
   {% endif %}
 </section>
 
-<details class="card collapsible" {% if not clients %}open{% endif %}>
-  <summary><span class="btn btn-primary">+ عميل جديد</span></summary>
+<details class="panel collapsible" id="new-client" {% if not clients %}open{% endif %}>
+  <summary>إضافة عميل جديد</summary>
+  <div class="panel-body">
   <form method="post" action="/clients" class="grid-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>اسم العميل<input name="name" required placeholder="شركة الدلتا للتجارة"></label>
-    <label>الرقم الضريبي<input name="tax_id" inputmode="numeric" placeholder="٩ أرقام"></label>
-    <label>رقم الواتساب<input name="whatsapp_phone" inputmode="tel" placeholder="01001234567">
+    <label>اسم العميل<input name="name" required placeholder="مثلًا: شركة الدلتا للتجارة"></label>
+    <label>الرقم الضريبي<input name="tax_id" inputmode="numeric" placeholder="٩ أرقام" class="num-input"></label>
+    <label>رقم الواتساب<input name="whatsapp_phone" inputmode="tel" placeholder="01001234567" class="num-input">
       <small class="muted">الفواتير اللي توصل من الرقم ده تتسجل للعميل ده</small></label>
     <label>ملاحظات<input name="notes"></label>
-    <div class="form-actions"><button class="btn btn-primary" type="submit">إضافة</button></div>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">إضافة العميل</button></div>
   </form>
+  </div>
 </details>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var q = document.getElementById('client-search');
+  if (!q) return;
+  q.addEventListener('input', function () {
+    var term = q.value.trim(), shown = 0;
+    document.querySelectorAll('#clients-table tbody tr').forEach(function (tr) {
+      var hit = !term || tr.dataset.search.indexOf(term) !== -1;
+      tr.hidden = !hit; if (hit) shown++;
+    });
+    document.getElementById('no-match').hidden = shown > 0;
+  });
+})();
+</script>
 {% endblock %}

@@ -1,0 +1,18 @@
+{# Small stroke icons (inline SVG, inherit currentColor). #}
+{% macro icon(name) -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == 'home' -%}<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/>
+{%- elif name == 'review' -%}<path d="M9 11l2 2 4-4"/><rect x="4" y="3.5" width="16" height="17" rx="2"/>
+{%- elif name == 'clients' -%}<circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.6-3 2.8-4.8 5.5-4.8s4.9 1.8 5.5 4.8"/><path d="M15.5 5.2a3 3 0 0 1 0 5.6M17 14.9c1.9.5 3.1 2 3.5 4.6"/>
+{%- elif name == 'upload' -%}<path d="M12 15.5V4.5M7.5 9 12 4.5 16.5 9"/><path d="M4.5 15v4.5h15V15"/>
+{%- elif name == 'excel' -%}<rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7"/>
+{%- elif name == 'sync' -%}<path d="M19.5 12a7.5 7.5 0 0 1-13 5.1M4.5 12a7.5 7.5 0 0 1 13-5.1"/><path d="M17.5 3v4h-4M6.5 21v-4h4"/>
+{%- elif name == 'search' -%}<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.3-4.3"/>
+{%- elif name == 'zoom-in' -%}<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.3-4.3M11 8v6M8 11h6"/>
+{%- elif name == 'zoom-out' -%}<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.3-4.3M8 11h6"/>
+{%- elif name == 'rotate' -%}<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4.5H15"/>
+{%- elif name == 'external' -%}<path d="M14 4.5h5.5V10M19.5 4.5 11 13"/><path d="M18 14v5.5H4.5V6H10"/>
+{%- elif name == 'plus' -%}<path d="M12 5v14M5 12h14"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}

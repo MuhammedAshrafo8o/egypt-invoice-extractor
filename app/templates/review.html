@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}محتاج مراجعة{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>محتاج مراجعة</h1>
+    <p class="sub">{% if queue %}{{ queue|length }} فاتورة عند {{ groups|length }} عميل. الأخطاء الأول، وبعدين اللي محتاج نظرة.{% else %}مفيش فواتير مستنياك.{% endif %}</p>
+  </div>
+  {% if queue %}<a class="btn btn-stamp" href="/invoices/{{ queue[0].id }}?queue=1">{{ icon('review') }} ابدأ من الأول</a>{% endif %}
+</div>
+
+{% if queue %}
+<section class="panel">
+  {% for (client_id, client_name), items in groups.items() %}
+  <div class="group-head">
+    <a class="strong" href="/clients/{{ client_id }}">{{ client_name }}</a>
+    <span class="muted small">{{ items|length }} فاتورة</span>
+  </div>
+  <div class="table-wrap">
+  <table class="table">
+    <tbody>
+    {% for inv in items %}
+      {% set first = inv.issues|selectattr('level', 'equalto', 'error')|first or inv.issues|first %}
+      <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}?queue=1'">
+        <td style="width:110px"><span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span></td>
+        <td>
+          <a class="strong" href="/invoices/{{ inv.id }}?queue=1"><bdi>{{ inv.supplier_name or inv.original_filename or 'فاتورة' }}</bdi></a>
+          {% if first %}<div class="row-note {% if first.level == 'error' %}error{% endif %}">{{ first.message_ar or first.message }}</div>{% endif %}
+        </td>
+        <td class="muted small" style="white-space:nowrap">{{ inv.period|period_label }}</td>
+        <td class="num">{{ inv.total|money }}</td>
+        <td style="width:100px"><a class="btn btn-small" href="/invoices/{{ inv.id }}?queue=1">مراجعة</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endfor %}
+</section>
+{% else %}
+<section class="panel"><div class="empty">
+  <span class="stamp lg">كله<br>متراجع</span>
+  <h2>خلصت المراجعة</h2>
+  <p class="muted">أي فاتورة جديدة فيها مشكلة هتظهر هنا.</p>
+  <a class="btn" href="/">الرئيسية</a>
+</div></section>
+{% endif %}
+{% endblock %}

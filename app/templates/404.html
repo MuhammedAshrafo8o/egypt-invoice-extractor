@@ -1,9 +1,15 @@
 {% extends "base.html" %}
 {% block title %}مش موجود{% endblock %}
 {% block content %}
-<div class="empty">
+<div class="panel"><div class="empty">
   <h1>الصفحة دي مش موجودة</h1>
   <p class="muted">يمكن اتمسحت، أو الرابط غلط.</p>
-  <a class="btn" href="/">ارجع للعملاء</a>
-</div>
+  <a class="btn btn-primary" href="/">الرئيسية</a>
+</div></div>
+{% endblock %}
+{% block guest %}
+<div class="auth-main" style="min-height:100vh"><div class="empty">
+  <h1>الصفحة دي مش موجودة</h1>
+  <a class="btn btn-primary" href="/login">تسجيل الدخول</a>
+</div></div>
 {% endblock %}

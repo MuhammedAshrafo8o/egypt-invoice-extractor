@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block guest %}
+<div class="auth">
+  <section class="auth-side">
+    <a class="brand" href="/login"><span class="brand-mark">د</span> دفتر</a>
+    <div>
+      <h2>فواتير عملائك، متقرية ومتراجعة وجاهزة للإقرار.</h2>
+      <ul>
+        <li>العميل يبعت الفاتورة صورة على الواتساب، وتتقري لوحدها</li>
+        <li>الفواتير الإلكترونية بتتسحب من المنظومة</li>
+        <li>بتراجع اللي فيه مشكلة بس، والباقي جاهز</li>
+        <li>ملف Excel للإقرار آخر الشهر</li>
+      </ul>
+    </div>
+    <p class="small">النسخة التجريبية</p>
+  </section>
+  <section class="auth-main">
+    <div class="auth-card">
+      {% include "_flashes.html" %}
+      {% block auth %}{% endblock %}
+    </div>
+  </section>
+</div>
+{% endblock %}

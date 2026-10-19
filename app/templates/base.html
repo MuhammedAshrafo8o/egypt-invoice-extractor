@@ -1,35 +1,57 @@
-<!doctype html>
+{% from "_icons.html" import icon %}<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}دفتر{% endblock %} · دفتر</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <title>{% block title %}دفتر{% endblock %} | دفتر</title>
+  <link rel="preload" href="/static/fonts/Alexandria.woff" as="font" type="font/woff" crossorigin>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  {% if user %}
-  <header class="topbar">
+{% if user %}
+<div class="shell">
+  <aside class="sidebar">
     <a class="brand" href="/"><span class="brand-mark">د</span> دفتر</a>
-    <nav class="topnav">
-      <a href="/">العملاء</a>
-    </nav>
-    <div class="topbar-end">
-      <span class="pill pill-{{ 'ok' if reader.kind == 'ai' else 'info' if reader.kind == 'ocr' else 'warn' }}"
-        title="الطريقة اللي بتتقري بيها الصور والـ PDF الممسوح — اتغيّر من ملف .env">{{ reader.label }}</span>
-      <span class="muted">{{ user.name }}</span>
-      <form method="post" action="/logout"><button class="link-btn" type="submit">خروج</button></form>
+    <a class="nav-link {% if nav == 'home' %}active{% endif %}" href="/">{{ icon('home') }}<span class="nav-text">الرئيسية</span></a>
+    <a class="nav-link {% if nav == 'review' %}active{% endif %}" href="/review">{{ icon('review') }}<span class="nav-text">محتاج مراجعة</span>
+      {% if pending_total %}<span class="nav-badge">{{ pending_total }}</span>{% endif %}</a>
+    <a class="nav-link {% if nav == 'clients' %}active{% endif %}" href="/#clients">{{ icon('clients') }}<span class="nav-text">العملاء</span></a>
+    <div class="sidebar-foot">
+      <div class="reader {{ reader.kind }}" title="الطريقة اللي بتتقري بيها الصور والـ PDF الممسوح — بتتغيّر من ملف .env">
+        <span class="reader-dot"></span><span>{{ reader.label }}</span>
+      </div>
+      <div class="sidebar-user">
+        <span>{{ user.name }}</span>
+        <form method="post" action="/logout"><button class="link-btn" type="submit">خروج</button></form>
+      </div>
     </div>
-  </header>
-  {% endif %}
-
-  <main class="{% block main_class %}container{% endblock %}">
-    {% for f in flashes %}
-      <div class="flash flash-{{ f.kind }}" role="status">{{ f.text }}</div>
-    {% endfor %}
+  </aside>
+  <main class="main {% block main_class %}{% endblock %}">
+    {% include "_flashes.html" %}
     {% block content %}{% endblock %}
   </main>
-  {% block scripts %}{% endblock %}
+</div>
+{% else %}
+  {% block guest %}{% endblock %}
+{% endif %}
+<div class="busy-overlay" id="busy" hidden>
+  <div class="busy-card"><div class="spinner"></div><strong id="busy-text">ثواني…</strong>
+    <p class="muted small" id="busy-sub"></p></div>
+</div>
+<script>
+// Forms with data-busy show a full-screen "working" card (reading invoices with AI can take a while).
+document.addEventListener('submit', function (e) {
+  var f = e.target;
+  if (!f.dataset || !f.dataset.busy) return;
+  document.getElementById('busy-text').textContent = f.dataset.busy;
+  document.getElementById('busy-sub').textContent = f.dataset.busySub || '';
+  setTimeout(function () { document.getElementById('busy').hidden = false; }, 120);
+});
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-dismiss]');
+  if (b) b.parentElement.remove();
+});
+</script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

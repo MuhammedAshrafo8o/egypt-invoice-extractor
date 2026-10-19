@@ -1,37 +1,60 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}فاتورة {{ invoice.invoice_number or invoice.id }}{% endblock %}
-{% block main_class %}container wide{% endblock %}
+{% block main_class %}wide{% endblock %}
+
+{% macro field(name, label, value, cls='', type='text', mode='') -%}
+<label class="{% if marked.get(name) %}field-{{ marked[name] }}{% endif %}"><span>{{ label }}</span>
+  <input name="{{ name }}" value="{{ value if value is not none else '' }}" type="{{ type }}" class="{{ cls }}"
+    {% if mode %}inputmode="{{ mode }}"{% endif %} {% if not cls %}dir="auto"{% endif %}></label>
+{%- endmacro %}
+
 {% block content %}
+{% if queue %}
+<div class="queue-bar">
+  <a href="/review" class="small">محتاج مراجعة</a>
+  <span class="bar"><i style="width: {{ (100 * ((queue.pos or 1) - 1) / (queue.total or 1))|round|int }}%"></i></span>
+  <span class="muted small">{% if queue.pos %}فاتورة {{ queue.pos }} من {{ queue.total }}{% else %}{{ queue.total }} فاتورة في المراجعة{% endif %}</span>
+</div>
+{% else %}
 <nav class="crumbs">
-  <a href="/?period={{ invoice.period }}">العملاء</a> /
+  <a href="/?period={{ invoice.period }}">الرئيسية</a> /
   <a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /
-  <span>فاتورة {{ invoice.invoice_number or ('#' ~ invoice.id) }}</span>
+  فاتورة <bdi>{{ invoice.invoice_number or ('#' ~ invoice.id) }}</bdi>
 </nav>
+{% endif %}
 
 <div class="review">
-  <section class="card preview">
-    {% if has_file %}
-      {% if is_pdf %}
-        <div class="pages">
-          {% for n in range(page_count) %}
-          <img src="/invoices/{{ invoice.id }}/page/{{ n }}.png" alt="صفحة {{ n + 1 }}" {% if n %}loading="lazy"{% endif %}>
-          {% endfor %}
-          <a class="small" href="/invoices/{{ invoice.id }}/file" target="_blank" rel="noopener">افتح الـ PDF الأصلي</a>
-        </div>
+  <section class="viewer" aria-label="الفاتورة الأصلية">
+    <div class="viewer-tools">
+      <button class="icon-btn" type="button" id="zoom-in" title="تكبير">{{ icon('zoom-in') }}</button>
+      <button class="icon-btn" type="button" id="zoom-out" title="تصغير">{{ icon('zoom-out') }}</button>
+      <button class="icon-btn" type="button" id="rotate" title="لف الصورة">{{ icon('rotate') }}</button>
+      <span class="spacer"></span>
+      {% if has_file %}<a class="icon-btn" href="/invoices/{{ invoice.id }}/file" target="_blank" rel="noopener" title="افتح الملف الأصلي">{{ icon('external') }}</a>{% endif %}
+    </div>
+    <div class="viewer-stage">
+      {% if has_file %}
+      <div class="pages" id="pages">
+        {% if is_pdf %}
+          {% for n in range(page_count) %}<img src="/invoices/{{ invoice.id }}/page/{{ n }}.png" alt="صفحة {{ n + 1 }}" {% if n %}loading="lazy"{% endif %}>{% endfor %}
+        {% else %}
+          <img src="/invoices/{{ invoice.id }}/file" alt="صورة الفاتورة">
+        {% endif %}
+      </div>
       {% else %}
-        <a href="/invoices/{{ invoice.id }}/file" target="_blank" rel="noopener"><img src="/invoices/{{ invoice.id }}/file" alt="صورة الفاتورة"></a>
+      <div class="empty"><p class="muted">الفاتورة دي اتسحبت من المنظومة، فمفيش ملف ليها.</p>
+        {% if invoice.eta_uuid %}<p class="small num-text">{{ invoice.eta_uuid }}</p>{% endif %}</div>
       {% endif %}
-    {% else %}
-      <div class="empty"><p class="muted">الفاتورة دي اتسحبت من المنظومة، مفيش ملف ليها.</p>
-        {% if invoice.eta_uuid %}<p class="mono small" dir="ltr">{{ invoice.eta_uuid }}</p>{% endif %}</div>
-    {% endif %}
+    </div>
   </section>
 
-  <section class="card">
+  <section class="panel review-form">
     <div class="review-head">
       <div>
-        {% if invoice.approved %}<span class="chip chip-ok">معتمدة</span>
+        {% if invoice.approved %}<span class="chip chip-approved">معتمدة</span>
         {% else %}<span class="chip chip-{{ invoice.status }}">{{ STATUS_LABELS[invoice.status] }}</span>{% endif %}
+        <span class="tag">{{ client.name }}</span>
         <span class="tag">{{ SOURCE_LABELS.get((invoice.source_type or 'unknown').split('+')[0], invoice.source_type) }}</span>
         <span class="tag">{{ CHANNEL_LABELS.get(invoice.channel, invoice.channel) }}</span>
       </div>
@@ -40,44 +63,56 @@
 
     {% if invoice.issues %}
     <ul class="issues">
-      {% for i in invoice.issues %}
+      {% for i in invoice.issues|sort(attribute='level') %}
         <li class="issue issue-{{ i.level }}">{{ i.message_ar or i.message }}</li>
       {% endfor %}
     </ul>
     {% endif %}
 
-    <form method="post" action="/invoices/{{ invoice.id }}/edit" class="grid-form" id="invoice-form">
+    <form method="post" action="/invoices/{{ invoice.id }}/edit" id="invoice-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       {% if next_id %}<input type="hidden" name="next_id" value="{{ next_id }}">{% endif %}
+      {% if queue %}<input type="hidden" name="queue" value="1">{% endif %}
+      <div class="grid-form review-fields">
+        <div class="section-title">المبالغ</div>
+        {{ field('subtotal', 'المبلغ قبل الضريبة', invoice.subtotal|amount_input, 'num-input amount', mode='decimal') }}
+        <label class="{% if marked.get('vat_amount') %}field-{{ marked['vat_amount'] }}{% endif %}"><span>قيمة الضريبة</span>
+          <input name="vat_amount" value="{{ invoice.vat_amount|amount_input }}" class="num-input amount" inputmode="decimal">
+          <small class="muted" id="rate-hint"></small></label>
+        <label class="{% if marked.get('total') %}field-{{ marked['total'] }}{% endif %}"><span>الإجمالي</span>
+          <input name="total" value="{{ invoice.total|amount_input }}" class="num-input amount" inputmode="decimal">
+          <small class="muted" id="sum-hint"></small></label>
+        {{ field('currency', 'العملة', invoice.currency or 'EGP', 'num-input') }}
 
-      <label>النوع
-        <select name="direction">
-          <option value="purchase" {% if invoice.direction == 'purchase' %}selected{% endif %}>مشتريات (ضريبة مدخلات)</option>
-          <option value="sale" {% if invoice.direction == 'sale' %}selected{% endif %}>مبيعات (ضريبة مخرجات)</option>
-        </select></label>
-      <label>تتحسب على شهر
-        <select name="period">
-          {% for p in periods %}<option value="{{ p }}" {% if p == invoice.period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
-        </select></label>
+        <div class="section-title">المورد والعميل</div>
+        {{ field('supplier_name', 'اسم المورد', invoice.supplier_name) }}
+        {{ field('supplier_tax_id', 'الرقم الضريبي للمورد', invoice.supplier_tax_id, 'num-input', mode='numeric') }}
+        {{ field('buyer_name', 'اسم المشتري', invoice.buyer_name) }}
+        {{ field('buyer_tax_id', 'الرقم الضريبي للمشتري', invoice.buyer_tax_id, 'num-input', mode='numeric') }}
 
-      <label>اسم المورد<input dir="auto" name="supplier_name" value="{{ invoice.supplier_name or '' }}"></label>
-      <label>الرقم الضريبي للمورد<input name="supplier_tax_id" value="{{ invoice.supplier_tax_id or '' }}" inputmode="numeric" class="mono"></label>
-      <label>اسم العميل (المشتري)<input dir="auto" name="buyer_name" value="{{ invoice.buyer_name or '' }}"></label>
-      <label>الرقم الضريبي للمشتري<input name="buyer_tax_id" value="{{ invoice.buyer_tax_id or '' }}" inputmode="numeric" class="mono"></label>
-      <label>رقم الفاتورة<input name="invoice_number" value="{{ invoice.invoice_number or '' }}" class="mono" dir="ltr"></label>
-      <label>التاريخ<input type="date" name="invoice_date" value="{{ invoice.invoice_date or '' }}"></label>
+        <div class="section-title">الفاتورة</div>
+        {{ field('invoice_number', 'رقم الفاتورة', invoice.invoice_number, 'num-input') }}
+        {{ field('invoice_date', 'التاريخ', invoice.invoice_date, 'num-input', type='date') }}
+        <label><span>النوع</span>
+          <select name="direction">
+            <option value="purchase" {% if invoice.direction == 'purchase' %}selected{% endif %}>مشتريات (ضريبة مدخلات)</option>
+            <option value="sale" {% if invoice.direction == 'sale' %}selected{% endif %}>مبيعات (ضريبة مخرجات)</option>
+          </select></label>
+        <label><span>تتحسب على شهر</span>
+          <select name="period">
+            {% for p in periods %}<option value="{{ p }}" {% if p == invoice.period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+          </select></label>
+      </div>
 
-      <label>المبلغ قبل الضريبة<input name="subtotal" value="{{ invoice.subtotal if invoice.subtotal is not none else '' }}" inputmode="decimal" class="mono amount" data-k="sub"></label>
-      <label>قيمة الضريبة<input name="vat_amount" value="{{ invoice.vat_amount if invoice.vat_amount is not none else '' }}" inputmode="decimal" class="mono amount" data-k="vat">
-        <small class="muted" id="rate-hint"></small></label>
-      <label>الإجمالي<input name="total" value="{{ invoice.total if invoice.total is not none else '' }}" inputmode="decimal" class="mono amount" data-k="total">
-        <small class="muted" id="sum-hint"></small></label>
-      <label>العملة<input name="currency" value="{{ invoice.currency or 'EGP' }}" maxlength="3" class="mono" dir="ltr"></label>
-
-      <div class="form-actions span-2">
-        <button class="btn btn-primary" type="submit" name="action" value="save_approve">حفظ واعتماد</button>
-        {% if next_id %}<button class="btn btn-primary" type="submit" name="action" value="save_next">اعتماد واللي بعدها ←</button>{% endif %}
-        <button class="btn" type="submit" name="action" value="save">حفظ بس</button>
+      <div class="action-bar">
+        {% if next_id %}
+          <button class="btn btn-stamp" type="submit" name="action" value="save_next" id="approve-next">اعتماد والفاتورة التالية</button>
+          <button class="btn" type="submit" name="action" value="save_approve">اعتماد</button>
+        {% else %}
+          <button class="btn btn-stamp" type="submit" name="action" value="save_approve" id="approve-next">اعتماد</button>
+        {% endif %}
+        <button class="btn" type="submit" name="action" value="save">حفظ من غير اعتماد</button>
+        <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> للاعتماد</span>
       </div>
     </form>
 
@@ -87,13 +122,15 @@
         <button class="link-btn" name="action" value="unapprove">إلغاء الاعتماد</button></form>
       {% endif %}
       {% if has_file %}
-      <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline" data-busy="بيقرا…"><input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="link-btn" name="action" value="reprocess" type="submit">اقرا الملف من جديد</button></form>
+      <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline" data-busy="بيقرا الفاتورة من جديد…">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="reprocess">
+        <button class="link-btn" type="submit">اقرا الملف من جديد</button></form>
       {% endif %}
       {% if invoice.eta_url %}<a class="link-btn" href="{{ invoice.eta_url }}" target="_blank" rel="noopener">افتح في المنظومة</a>{% endif %}
       <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline" onsubmit="return confirm('تمسح الفاتورة دي؟')">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="link-btn danger" name="action" value="delete" type="submit">مسح الفاتورة</button></form>
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="delete">
+        {% if queue %}<input type="hidden" name="queue" value="1">{% endif %}
+        <button class="link-btn danger" type="submit">مسح الفاتورة</button></form>
     </div>
   </section>
 </div>
@@ -102,27 +139,39 @@
 {% block scripts %}
 <script>
 (function () {
+  // live checks while editing amounts
   function num(el) { var v = parseFloat((el.value || '').replace(/,/g, '')); return isNaN(v) ? null : v; }
   var f = document.getElementById('invoice-form');
-  var sub = f.querySelector('[data-k=sub]'), vat = f.querySelector('[data-k=vat]'), tot = f.querySelector('[data-k=total]');
+  var sub = f.elements.subtotal, vat = f.elements.vat_amount, tot = f.elements.total;
   var rateHint = document.getElementById('rate-hint'), sumHint = document.getElementById('sum-hint');
   function update() {
     var s = num(sub), v = num(vat), t = num(tot);
     rateHint.textContent = (s && v !== null) ? 'النسبة ' + (v / s * 100).toFixed(2) + '٪' : '';
     if (s !== null && v !== null && t !== null) {
-      var diff = t - (s + v);
-      sumHint.textContent = Math.abs(diff) <= 1 ? '✓ الإجمالي مظبوط' : 'الفرق ' + diff.toFixed(2);
-      sumHint.className = Math.abs(diff) <= 1 ? 'ok-text' : 'error-text';
+      var diff = t - (s + v), ok = Math.abs(diff) <= 1;
+      sumHint.textContent = ok ? 'الإجمالي مظبوط' : 'الفرق ' + diff.toFixed(2);
+      sumHint.className = ok ? 'ok-text' : 'error-text';
     } else { sumHint.textContent = ''; }
   }
   [sub, vat, tot].forEach(function (el) { el.addEventListener('input', update); });
   update();
-  document.querySelectorAll('form[data-busy]').forEach(function (form) {
-    form.addEventListener('submit', function () {
-      var btn = form.querySelector('button[type=submit]');
-      if (btn) { setTimeout(function () { btn.disabled = true; btn.textContent = form.dataset.busy; }, 0); }
-    });
+
+  // Ctrl/Cmd + Enter approves (and moves on when there is a next invoice)
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault(); document.getElementById('approve-next').click();
+    }
   });
+
+  // viewer: zoom and rotate
+  var pages = document.getElementById('pages');
+  if (pages) {
+    var scale = 1, turn = 0;
+    function apply() { pages.style.transform = 'scale(' + scale + ') rotate(' + turn + 'deg)'; }
+    document.getElementById('zoom-in').onclick = function () { scale = Math.min(3, scale + 0.25); apply(); };
+    document.getElementById('zoom-out').onclick = function () { scale = Math.max(0.5, scale - 0.25); apply(); };
+    document.getElementById('rotate').onclick = function () { turn = (turn + 90) % 360; apply(); };
+  }
 })();
 </script>
 {% endblock %}

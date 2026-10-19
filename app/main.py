@@ -26,7 +26,7 @@ from . import whatsapp
 from .config import Settings, load_settings
 from .db import Database
 from .exports import build_workbook
-from .services import InvoiceService, UploadError, current_period, valid_period
+from .services import InvoiceService, UploadError, current_period, filing_deadline, valid_period
 
 log = logging.getLogger(__name__)
 HERE = Path(__file__).parent
@@ -41,10 +41,49 @@ MONTHS_AR = ["يناير", "فبراير", "مارس", "أبريل", "مايو",
              "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 
 
+# Which form field each validation finding points at (to outline it on the review screen).
+ISSUE_FIELDS = {
+    "supplier_tax_id": ("supplier_tax_id",), "buyer_tax_id": ("buyer_tax_id",),
+    "total_mismatch": ("total", "subtotal", "vat_amount"), "vat_rate": ("vat_amount",),
+    "vat_missing": ("vat_amount",), "subtotal": ("subtotal",), "total_": ("total",),
+    "date_": ("invoice_date",), "invoice_date": ("invoice_date",),
+    "invoice_number": ("invoice_number",), "duplicate": ("invoice_number",),
+    "same_tax_id": ("supplier_tax_id", "buyer_tax_id"),
+}
+
+
+def issue_fields(issues: list) -> dict:
+    """{field_name: 'error' | 'warning'} for the fields the findings refer to."""
+    marked: dict = {}
+    for issue in issues or []:
+        code = issue.get("code", "")
+        for prefix, fields in ISSUE_FIELDS.items():
+            if code.startswith(prefix):
+                for f in fields:
+                    if marked.get(f) != "error":
+                        marked[f] = issue.get("level", "warning")
+    return marked
+
+
 def money(value) -> str:
     if value is None or value == "":
         return "—"
     return f"{float(value):,.2f}"
+
+
+def dmy(value) -> str:
+    """2026-10-15 -> 15/10/2026 (how dates are written on Egyptian invoices)."""
+    if not value:
+        return "—"
+    try:
+        y, m, d = str(value)[:10].split("-")
+        return f"{d}/{m}/{y}"
+    except ValueError:
+        return str(value)
+
+
+def amount_input(value) -> str:
+    return "" if value is None or value == "" else f"{float(value):.2f}"
 
 
 def period_label(period: str) -> str:
@@ -83,6 +122,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     env = templates.env
     env.filters["money"] = money
     env.filters["period_label"] = period_label
+    env.filters["dmy"] = dmy
+    env.filters["amount_input"] = amount_input
     env.globals.update(STATUS_LABELS=STATUS_LABELS, SOURCE_LABELS=SOURCE_LABELS,
                        CHANNEL_LABELS=CHANNEL_LABELS)
 
@@ -104,7 +145,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         user = db.get_accountant(session["uid"]) if session.get("uid") else None
         return templates.TemplateResponse(request, name, {
             "user": user, "csrf": session["csrf"], "flashes": flashes,
-            "settings": settings, "reader": reader_status(), **ctx,
+            "settings": settings, "reader": reader_status(),
+            "pending_total": db.pending_count(user["id"]) if user else 0, **ctx,
         }, status_code=status_code)
 
     def flash(request: Request, message: str, kind: str = "info") -> None:
@@ -197,14 +239,31 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     async def dashboard(request: Request):
         period = valid_period(request.query_params.get("period"))
         clients = db.list_clients(request.state.user["id"], period)
+        for c in clients:
+            c["pending"] = (c["error_count"] or 0) + (c["review_count"] or 0)
+            c["done"] = (c["invoice_count"] or 0) - c["pending"]
+            c["net_vat"] = (c["output_vat"] or 0) - (c["input_vat"] or 0)
+            c["ready"] = bool(c["invoice_count"]) and c["pending"] == 0
+        clients.sort(key=lambda c: (c["ready"], -c["pending"], c["name"]))
         totals = {
             "clients": len(clients),
             "invoices": sum(c["invoice_count"] or 0 for c in clients),
             "errors": sum(c["error_count"] or 0 for c in clients),
             "reviews": sum(c["review_count"] or 0 for c in clients),
+            "ready": sum(1 for c in clients if c["ready"]),
+            "net_vat": round(sum(c["net_vat"] for c in clients), 2),
         }
-        return render(request, "dashboard.html", clients=clients, period=period,
-                      periods=recent_periods(), totals=totals)
+        return render(request, "dashboard.html", clients=clients, period=period, nav="home",
+                      periods=recent_periods(), totals=totals,
+                      deadline=filing_deadline(settings.vat_deadline_day))
+
+    @login_required
+    async def review_queue(request: Request):
+        queue = db.pending_invoices(request.state.user["id"])
+        groups: dict = {}
+        for inv in queue:
+            groups.setdefault((inv["client_id"], inv["client_name"]), []).append(inv)
+        return render(request, "review.html", nav="review", queue=queue, groups=groups)
 
     @login_required
     async def client_create(request: Request):
@@ -230,7 +289,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         status = request.query_params.get("status") or None
         direction = request.query_params.get("direction") or None
         invoices = db.list_invoices(client["id"], period, status, direction)
-        return render(request, "client.html", client=client, invoices=invoices, period=period,
+        return render(request, "client.html", client=client, invoices=invoices, period=period, nav="clients",
                       periods=recent_periods(db.periods(client["id"])), status=status, direction=direction,
                       summary=service.summary(client["id"], period))
 
@@ -327,8 +386,18 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     async def invoice_detail(request: Request):
         invoice = get_invoice_or_404(request, request.path_params["invoice_id"])
         client = db.get_client(invoice["client_id"])
-        siblings = db.list_invoices(client["id"], invoice["period"], "pending")
-        ids = [i["id"] for i in siblings if i["id"] != invoice["id"]]
+        queue_mode = request.query_params.get("queue") == "1"
+        if queue_mode:
+            all_ids = [i["id"] for i in db.pending_invoices(request.state.user["id"])]
+        else:
+            all_ids = [i["id"] for i in db.list_invoices(client["id"], invoice["period"], "pending")]
+        # next = the first pending invoice after this one (wrapping around)
+        if invoice["id"] in all_ids:
+            pos = all_ids.index(invoice["id"])
+            ids = all_ids[pos + 1:] + all_ids[:pos]
+        else:
+            pos, ids = None, all_ids
+        queue_info = {"pos": (pos + 1) if pos is not None else None, "total": len(all_ids)} if queue_mode else None
         is_pdf = (invoice.get("stored_path") or "").lower().endswith(".pdf")
         page_count = 0
         if is_pdf and Path(invoice["stored_path"]).is_file():
@@ -341,7 +410,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                 page_count = 1
         return render(request, "invoice.html", invoice=invoice, client=client, next_id=ids[0] if ids else None,
                       is_pdf=is_pdf, page_count=page_count, has_file=bool(invoice.get("stored_path")),
-                      periods=recent_periods([invoice["period"]]))
+                      periods=recent_periods([invoice["period"]]), queue=queue_info,
+                      marked=issue_fields(invoice["issues"]), nav="review" if queue_mode else "clients")
 
     @login_required
     async def invoice_update(request: Request):
@@ -358,7 +428,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                     cached.unlink(missing_ok=True)
                 stored.unlink(missing_ok=True)
             flash(request, "اتمسحت الفاتورة.", "success")
-            return redirect(back)
+            return redirect("/review" if form.get("queue") == "1" else back)
         if action == "reprocess":
             try:
                 await run_in_threadpool(service.reprocess, client, invoice)
@@ -376,16 +446,20 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             db.update_invoice(invoice["id"], {"approved": 0})
             return redirect(f"/invoices/{invoice['id']}")
 
+        q = "?queue=1" if form.get("queue") == "1" else ""
         approve = action in ("save_approve", "save_next")
         service.save_edit(client, invoice, dict(form), approve=approve)
         updated = db.get_invoice(invoice["id"])
         if approve and not updated["approved"]:
             flash(request, "اتحفظت التعديلات، بس لسه فيه أخطاء لازم تتصلح قبل الاعتماد.", "error")
-            return redirect(f"/invoices/{invoice['id']}")
+            return redirect(f"/invoices/{invoice['id']}{q}")
         flash(request, "اتحفظت الفاتورة" + (" واتعتمدت." if updated["approved"] else "."), "success")
-        if action == "save_next" and form.get("next_id"):
-            return redirect(f"/invoices/{form.get('next_id')}")
-        return redirect(f"/invoices/{invoice['id']}")
+        if action == "save_next":
+            if form.get("next_id"):
+                return redirect(f"/invoices/{form.get('next_id')}{q}")
+            flash(request, "خلصت كل الفواتير اللي محتاجة مراجعة.", "success")
+            return redirect("/review" if q else f"/clients/{client['id']}?period={updated['period']}")
+        return redirect(f"/invoices/{invoice['id']}{q}")
 
     @login_required
     async def invoice_file(request: Request):
@@ -464,6 +538,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
 
     routes = [
         Route("/", dashboard),
+        Route("/review", review_queue),
         Route("/login", login, methods=["GET", "POST"]),
         Route("/register", register, methods=["GET", "POST"]),
         Route("/logout", logout, methods=["POST", "GET"]),

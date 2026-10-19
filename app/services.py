@@ -5,7 +5,7 @@ import json
 import logging
 import uuid as uuidlib
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +40,27 @@ def period_for(invoice_date: Optional[str]) -> str:
     if (d - today).days > 1 or (today - d).days > 400:
         return current_period()
     return d.strftime("%Y-%m")
+
+
+def filing_deadline(deadline_day: int = 0, today: Optional[date] = None) -> dict:
+    """The VAT return being prepared now: last month's, due in this month
+    (on `deadline_day`, or the month's last day when 0). Once that date passes,
+    the next one (this month's return) is shown."""
+    import calendar
+
+    today = today or date.today()
+
+    def due_in(year: int, month: int) -> date:
+        last = calendar.monthrange(year, month)[1]
+        return date(year, month, min(deadline_day, last) if deadline_day else last)
+
+    period_month = date(today.year, today.month, 1) - timedelta(days=1)  # last day of previous month
+    due = due_in(today.year, today.month)
+    if today > due:
+        period_month = today
+        nxt = (date(today.year, today.month, 28) + timedelta(days=4)).replace(day=1)
+        due = due_in(nxt.year, nxt.month)
+    return {"period": period_month.strftime("%Y-%m"), "due": due, "days_left": (due - today).days}
 
 
 def valid_period(value: Optional[str]) -> str:
