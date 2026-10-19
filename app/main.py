@@ -270,20 +270,32 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         if not files:
             flash(request, "اختار ملف واحد على الأقل.", "error")
             return redirect(f"/clients/{client['id']}")
-        done, failed = 0, []
+        viewed_period = valid_period(form.get("period"))
+        new_ids, failed = [], []
         for upload in files:
             content = await upload.read()
             await upload.close()
             try:
-                await run_in_threadpool(service.add_file, client, upload.filename, content, "upload")
-                done += 1
+                new_ids.append(await run_in_threadpool(service.add_file, client, upload.filename, content, "upload"))
             except UploadError as exc:
                 failed.append(f"{upload.filename}: {exc}")
-        if done:
-            flash(request, f"اترفعت {done} فاتورة واتقرت.", "success")
         for msg in failed:
             flash(request, msg, "error")
-        return redirect(f"/clients/{client['id']}?period={valid_period(form.get('period'))}")
+        if len(new_ids) == 1 and not failed:
+            # One invoice: open it straight away so its fields are on screen.
+            flash(request, "اتقرت الفاتورة — راجع البيانات، صلّح لو فيه غلط، واعتمدها.", "success")
+            return redirect(f"/invoices/{new_ids[0]}")
+        if new_ids:
+            flash(request, f"اترفعت {len(new_ids)} فاتورة واتقرت. دوس على أي فاتورة عشان تشوف بياناتها.", "success")
+            other = {}
+            for inv_id in new_ids:
+                p = db.get_invoice(inv_id)["period"]
+                if p != viewed_period:
+                    other[p] = other.get(p, 0) + 1
+            for p, n in other.items():
+                flash(request, f"{n} فاتورة اتسجلت على شهر {period_label(p)} حسب تاريخها — غيّر الشهر من فوق عشان تشوفها.",
+                      "info")
+        return redirect(f"/clients/{client['id']}?period={viewed_period}")
 
     @login_required
     async def client_export(request: Request):

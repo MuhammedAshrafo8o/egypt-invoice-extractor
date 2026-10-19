@@ -29,6 +29,19 @@ def current_period() -> str:
     return date.today().strftime("%Y-%m")
 
 
+def period_for(invoice_date: Optional[str]) -> str:
+    """Month an invoice counts in: its own month, unless the date looks wrong
+    (future, or more than ~13 months old — usually a misread year), then this month."""
+    try:
+        d = date.fromisoformat(invoice_date or "")
+    except ValueError:
+        return current_period()
+    today = date.today()
+    if (d - today).days > 1 or (today - d).days > 400:
+        return current_period()
+    return d.strftime("%Y-%m")
+
+
 def valid_period(value: Optional[str]) -> str:
     if value and len(value) == 7 and value[4] == "-" and value[:4].isdigit() and value[5:].isdigit():
         return value
@@ -78,7 +91,7 @@ class InvoiceService:
         record.update(
             status=inv.status,
             direction=direction if direction in ("purchase", "sale") else self.detect_direction(client, inv),
-            period=valid_period(period or (inv.invoice_date or "")[:7] or None),
+            period=valid_period(period) if period else period_for(inv.invoice_date),
             issues_json=json.dumps([i.to_dict() for i in inv.issues], ensure_ascii=False),
         )
         return record
@@ -192,7 +205,7 @@ class InvoiceService:
         inv.eta_uuid = fields.get("eta_uuid")
         inv.source_type = "eta_api"
         validate_invoice(inv)
-        record = self._finalize(client, inv, period=(inv.invoice_date or "")[:7] or period)
+        record = self._finalize(client, inv)
         record.update(channel="eta_sync", original_filename=inv.source_file)
         if inv.status != "error":
             record["approved"] = 1  # official record, no manual review needed

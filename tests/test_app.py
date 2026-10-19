@@ -246,6 +246,28 @@ class InvoiceFlowTests(AppTestCase):
         self.assertTrue(str(purchases.cell(row=6, column=8).value).startswith("=SUMIFS"))
         self.assertEqual(wb["ملخص الإقرار"]["B10"].value, "=B7-B9")
 
+    def test_single_upload_opens_the_invoice(self):
+        s = self.session("single@x.com")
+        cid = self.create_client(s, "عميل", "300112455")
+        token = self.csrf(s, f"{self.base}/clients/{cid}")
+        r = s.post(f"{self.base}/clients/{cid}/upload", data={"csrf": token, "period": PERIOD},
+                   files=[("files", ("07_arabic.pdf", (SAMPLES / "07_arabic.pdf").read_bytes(), "application/pdf"))],
+                   allow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertRegex(r.headers["location"], r"^/invoices/\d+$")
+        page = s.get(self.base + r.headers["location"]).text
+        self.assertIn("اتقرت الفاتورة", page)
+        self.assertIn('value="488201736"', page)  # fields are on screen
+
+    def test_period_for_suspicious_dates(self):
+        from app.services import current_period, period_for
+        self.assertEqual(period_for(TODAY.isoformat()), PERIOD)
+        self.assertEqual(period_for("2062-10-12"), current_period())   # misread year
+        self.assertEqual(period_for("2019-01-05"), current_period())   # far too old
+        self.assertEqual(period_for(None), current_period())
+        last_month = (TODAY.replace(day=1) - timedelta(days=1))
+        self.assertEqual(period_for(last_month.isoformat()), last_month.strftime("%Y-%m"))
+
     def test_sale_detection_and_filters(self):
         s = self.session("seller@x.com")
         cid = self.create_client(s, "مكتبة النيل", "512334901")  # the issuer of sample 01

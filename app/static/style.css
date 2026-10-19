@@ -105,6 +105,7 @@ legend { font-weight: 600; padding: 0 6px; }
 .btn-primary:hover { background: var(--brand-2); }
 .btn-danger { background: var(--err); border-color: var(--err); color: #fff; }
 .btn-block { width: 100%; }
+.btn-small { min-height: 30px; padding: 3px 12px; font-size: .82rem; white-space: nowrap; }
 .btn:disabled { opacity: .6; cursor: progress; }
 .link-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--brand-2); cursor: pointer; }
 .link-btn:hover { text-decoration: underline; }

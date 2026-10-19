@@ -77,7 +77,7 @@
   <table class="table">
     <thead><tr>
       <th>الحالة</th><th>التاريخ</th><th>الطرف الآخر</th><th>رقم الفاتورة</th><th>النوع</th>
-      <th class="num">قبل الضريبة</th><th class="num">الضريبة</th><th class="num">الإجمالي</th><th>المصدر</th>
+      <th class="num">قبل الضريبة</th><th class="num">الضريبة</th><th class="num">الإجمالي</th><th>المصدر</th><th></th>
     </tr></thead>
     <tbody>
     {% for inv in invoices %}
@@ -94,6 +94,7 @@
         <td class="num mono">{{ inv.vat_amount|money }}</td>
         <td class="num mono strong">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
         <td><span class="tag">{{ CHANNEL_LABELS.get(inv.channel, inv.channel) }}</span></td>
+        <td><a class="btn btn-small" href="/invoices/{{ inv.id }}">{{ 'عرض' if inv.approved or inv.status == 'ok' else 'مراجعة' }}</a></td>
       </tr>
     {% endfor %}
     </tbody>

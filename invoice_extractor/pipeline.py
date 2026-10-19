@@ -108,14 +108,31 @@ def _read_with_ai(inv: Invoice, path: Path) -> bool:
     return True
 
 
+def _ocr_score(data: dict) -> float:
+    """How trustworthy one OCR reading looks: fields found + numbers that check out."""
+    score = sum(1 for k in ("supplier_tax_id", "invoice_date", "invoice_number", "subtotal", "vat_amount", "total")
+                if data.get(k) not in (None, ""))
+    if data.get("supplier_tax_id") and len(data["supplier_tax_id"]) == 9:
+        score += 1
+    sub, vat, total = data.get("subtotal"), data.get("vat_amount"), data.get("total")
+    if None not in (sub, vat, total) and abs(total - (sub + vat)) <= 1:
+        score += 3
+    return score
+
+
 def _read_with_ocr(inv: Invoice, path: Path) -> None:
     try:
-        text = ocr.ocr_file(path)
+        texts = ocr.ocr_passes(path)
     except ocr.OCRError as exc:
         inv.add_issue("warning", "ocr_failed", f"OCR failed: {exc}", f"القراءة المجانية (OCR) فشلت: {exc}")
         return
-    inv.raw_text = text
-    filled = inv.merge_missing(_clean(parse_text(text)))
+    readings = sorted(((_ocr_score(d), i, d, t) for i, (d, t) in
+                       enumerate((_clean(parse_text(t)), t) for t in texts)), key=lambda r: (-r[0], r[1]))
+    best_text, best = readings[0][3], readings[0][2]
+    inv.raw_text = best_text
+    filled = inv.merge_missing(best)
+    for _, _, other, _ in readings[1:]:  # fill gaps the best pass missed
+        filled += inv.merge_missing(other)
     if inv.source_type == "unknown":
         inv.source_type = "ocr"
     elif filled:

@@ -276,12 +276,6 @@ from invoice_extractor.extractors import ocr  # noqa: E402
 
 
 class OCRTests(unittest.TestCase):
-    def test_rtl_number_groups(self):
-        self.assertEqual(ocr.fix_rtl_number_groups("رقم التسجيل الضريبي:382-904-615"),
-                         "رقم التسجيل الضريبي:615-904-382")
-        self.assertEqual(ocr.fix_rtl_number_groups("Tax No: 382-904-615"), "Tax No: 382-904-615")
-        self.assertEqual(ocr.fix_rtl_number_groups("التاريخ:15/10/2026"), "التاريخ:15/10/2026")
-
     @unittest.skipUnless(ocr.status() == "ok", "Tesseract with Arabic is not installed")
     def test_photos_read_offline(self):
         with ai_env():

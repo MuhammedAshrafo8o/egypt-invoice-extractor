@@ -71,13 +71,15 @@ class Hand:
 
     def _word(self, text: str, size: int, ink) -> Image.Image:
         font = ImageFont.truetype(self.font_path, size)
+        # Numbers (dates, tax IDs) are written left-to-right even inside Arabic text.
+        direction = "rtl" if any("\u0621" <= ch <= "\u064a" for ch in text) else "ltr"
         probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-        box = probe.textbbox((0, 0), text, font=font, direction="rtl", language="ar")
+        box = probe.textbbox((0, 0), text, font=font, direction=direction, language="ar")
         w, h = box[2] - box[0] + 20, box[3] - box[1] + 30
         layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         d = ImageDraw.Draw(layer)
         alpha = self.rng.randint(205, 245)  # ink pressure
-        d.text((10 - box[0], 15 - box[1]), text, font=font, fill=(*ink, alpha), direction="rtl", language="ar")
+        d.text((10 - box[0], 15 - box[1]), text, font=font, fill=(*ink, alpha), direction=direction, language="ar")
         return layer.rotate(self.rng.uniform(-2.5, 2.5), resample=Image.BICUBIC, expand=True)
 
     def write(self, right_x: int, baseline_y: int, text: str, size: int = 44, ink=PEN, slope: float = 0.0):
@@ -151,7 +153,7 @@ def make_invoice(fonts: Path) -> Image.Image:
 
     # ---- handwriting
     hand = Hand(img, ruqaa)
-    hand.write(1060, 362, f"{ar(12)} / {ar(10)} / {ar(2026)}", 46, slope=0.01)
+    hand.write(1060, 362, f"{ar(12)}/{ar(10)}/{ar(2026)}", 46, slope=0.01)
     hand.write(900, 428, "شركة الدلتا للتجارة", 50, slope=0.012)
     hand.write(860, 494, f"{ar(300)}-{ar(112)}-{ar(455)}", 46)
 

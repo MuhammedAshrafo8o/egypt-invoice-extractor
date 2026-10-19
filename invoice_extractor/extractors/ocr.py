@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import functools
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -98,7 +97,12 @@ def _prepare(image: Image.Image) -> Image.Image:
     return ImageOps.autocontrast(image, cutoff=1)
 
 
-def ocr_image(image: Image.Image, timeout: int = 90) -> str:
+# Page-segmentation modes tried on every image. No single mode wins on all invoices:
+# 4 keeps "label: value" lines together, 6/11 recover digits that 4 sometimes drops.
+PSM_MODES = ("4", "6", "11")
+
+
+def ocr_image(image: Image.Image, timeout: int = 90, psm: str = "4") -> str:
     if not is_available():
         raise OCRError("Tesseract is not installed")
     langs = "+".join(lang for lang in LANGS if lang in available_languages())
@@ -108,7 +112,7 @@ def ocr_image(image: Image.Image, timeout: int = 90) -> str:
         _prepare(image).save(tmp)
         # psm 4 = single column of variable-size lines: keeps "label: value" together on invoices.
         result = subprocess.run(
-            _base_cmd() + [tmp, "stdout", "-l", langs, "--psm", "4", "-c", "preserve_interword_spaces=1"],
+            _base_cmd() + [tmp, "stdout", "-l", langs, "--psm", psm, "-c", "preserve_interword_spaces=1"],
             capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -117,34 +121,36 @@ def ocr_image(image: Image.Image, timeout: int = 90) -> str:
         Path(tmp).unlink(missing_ok=True)
     if result.returncode != 0:
         raise OCRError(result.stderr.decode("utf-8", "replace")[:300])
-    return fix_rtl_number_groups(result.stdout.decode("utf-8", "replace"))
+    return result.stdout.decode("utf-8", "replace")
 
 
-_ARABIC = re.compile(r"[\u0600-\u06FF]")
-_GROUPED = re.compile(r"(?<![\d-])\d{2,4}(?:-\d{2,4})+(?![\d-])")
-
-
-def fix_rtl_number_groups(text: str) -> str:
-    """Tesseract returns hyphen-grouped numbers on Arabic lines in reverse group order
-    (615-904-382 comes out as 382-904-615). Put the groups back in order."""
-    out = []
-    for line in text.splitlines():
-        if _ARABIC.search(line):
-            line = _GROUPED.sub(lambda m: "-".join(reversed(m.group(0).split("-"))), line)
-        out.append(line)
-    return "\n".join(out)
-
-
-def ocr_file(path: Path, max_pages: int = 3) -> str:
-    path = Path(path)
+def _pages(path: Path, max_pages: int) -> list[Image.Image]:
     if path.suffix.lower() == ".pdf":
         import pypdfium2 as pdfium
 
         pdf = pdfium.PdfDocument(str(path))
         try:
-            pages = [pdf[i].render(scale=300 / 72).to_pil() for i in range(min(len(pdf), max_pages))]
+            return [pdf[i].render(scale=300 / 72).to_pil() for i in range(min(len(pdf), max_pages))]
         finally:
             pdf.close()
-        return "\n".join(ocr_image(page) for page in pages)
     with Image.open(path) as image:
-        return ocr_image(image)
+        image.load()
+        return [image.copy()]
+
+
+def ocr_file(path: Path, max_pages: int = 3, psm: str = "4") -> str:
+    return "\n".join(ocr_image(page, psm=psm) for page in _pages(Path(path), max_pages))
+
+
+def ocr_passes(path: Path, max_pages: int = 3) -> list[str]:
+    """One OCR text per page-segmentation mode; the caller keeps the most consistent one."""
+    pages = _pages(Path(path), max_pages)
+    texts = []
+    for psm in PSM_MODES:
+        try:
+            texts.append("\n".join(ocr_image(page, psm=psm) for page in pages))
+        except OCRError:
+            continue
+    if not texts:
+        raise OCRError("All OCR passes failed")
+    return texts
