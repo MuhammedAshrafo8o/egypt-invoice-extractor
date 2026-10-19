@@ -168,7 +168,7 @@ if __name__ == "__main__":
 
 
 AI_ENV_KEYS = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY",
-               "AI_PROVIDER", "ANTHROPIC_BASE_URL", "GEMINI_BASE_URL")
+               "AI_PROVIDER", "ANTHROPIC_BASE_URL", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_FALLBACK_MODELS")
 FAKE_FIELDS = ('{"supplier_tax_id": "377-901-224", "invoice_date": "2026-10-10", "subtotal": 12500, '
                '"vat_amount": 1750, "total": 14250, "invoice_number": "GB-3301", "confidence": 0.95}')
 
@@ -176,7 +176,8 @@ FAKE_FIELDS = ('{"supplier_tax_id": "377-901-224", "invoice_date": "2026-10-10",
 class FakeAPIServer:
     """Tiny local HTTP server standing in for an AI provider."""
 
-    def __init__(self, reply: dict):
+    def __init__(self, reply: dict, fail_when=None):
+        """fail_when(path, n) -> HTTP status to answer instead (n = request number from 1), or None."""
         import json
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -189,8 +190,9 @@ class FakeAPIServer:
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 outer.requests.append({"path": self.path, "body": body,
                                        "headers": {k.lower(): v for k, v in self.headers.items()}})
-                data = json.dumps(reply).encode()
-                self.send_response(200)
+                status = fail_when(self.path, len(outer.requests)) if fail_when else None
+                data = json.dumps({"error": {"code": status, "message": "high demand"}} if status else reply).encode()
+                self.send_response(status or 200)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(data)))
                 self.end_headers()
@@ -290,6 +292,43 @@ class OCRTests(unittest.TestCase):
             self.assertEqual(inv.source_type, "ocr")
             self.assertEqual(inv.status, "review")  # OCR results always get a human look
             self.assertIn("ocr_used", [i.code for i in inv.issues])
+
+    GEMINI_REPLY = {"candidates": [{"content": {"parts": [{"text": '{"supplier_tax_id": "377901224", "total": 14250}'}]}}]}
+
+    def test_retries_when_model_is_overloaded(self):
+        server = FakeAPIServer(self.GEMINI_REPLY, fail_when=lambda path, n: 503 if n <= 2 else None)
+        try:
+            with ai_env(GEMINI_API_KEY="k", GEMINI_BASE_URL=server.url, GEMINI_MODEL="main-model"), \
+                    mock.patch.object(ai_vision.time, "sleep"):
+                data = ai_vision.extract_with_ai(SAMPLES / "05_photo.jpg")
+        finally:
+            server.close()
+        self.assertEqual(data["total"], 14250)
+        self.assertEqual([r["path"] for r in server.requests], ["/models/main-model:generateContent"] * 3)
+
+    def test_switches_to_fallback_model_when_main_stays_overloaded(self):
+        server = FakeAPIServer(self.GEMINI_REPLY,
+                               fail_when=lambda path, n: 503 if "main-model" in path else (404 if "missing" in path else None))
+        try:
+            with ai_env(GEMINI_API_KEY="k", GEMINI_BASE_URL=server.url, GEMINI_MODEL="main-model",
+                        GEMINI_FALLBACK_MODELS="missing-model,backup-model"), mock.patch.object(ai_vision.time, "sleep"):
+                data = ai_vision.extract_with_ai(SAMPLES / "05_photo.jpg")
+        finally:
+            server.close()
+        self.assertEqual(data["supplier_tax_id"], "377901224")
+        paths = [r["path"].split("/")[-1].split(":")[0] for r in server.requests]
+        self.assertEqual(paths, ["main-model"] * 3 + ["missing-model", "backup-model"])
+
+    def test_bad_key_is_not_retried(self):
+        server = FakeAPIServer(self.GEMINI_REPLY, fail_when=lambda path, n: 403)
+        try:
+            with ai_env(GEMINI_API_KEY="k", GEMINI_BASE_URL=server.url), mock.patch.object(ai_vision.time, "sleep"):
+                with self.assertRaises(ai_vision.AIExtractionError) as ctx:
+                    ai_vision.extract_with_ai(SAMPLES / "05_photo.jpg")
+        finally:
+            server.close()
+        self.assertEqual(len(server.requests), 1)
+        self.assertIn("مفتاح", ctx.exception.message_ar)
 
     @unittest.skipUnless(ocr.status() == "ok", "Tesseract with Arabic is not installed")
     def test_falls_back_to_ocr_when_ai_fails(self):

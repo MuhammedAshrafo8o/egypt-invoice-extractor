@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -25,6 +26,11 @@ API_URL = "https://api.anthropic.com/v1/messages"  # override base with ANTHROPI
 DEFAULT_MODEL = "claude-sonnet-5-5"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"  # override with GEMINI_BASE_URL
 GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
+# Tried in order when the main Gemini model is overloaded (503) or rate-limited (429).
+# Override with GEMINI_FALLBACK_MODELS (comma separated, empty = no fallback).
+GEMINI_FALLBACK_MODELS = "gemini-flash-lite-latest,gemini-2.5-flash"
+RETRY_DELAYS = (2, 6)  # seconds between attempts on temporary errors
+TRANSIENT_CODES = {429, 500, 502, 503, 504}
 
 MEDIA_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -56,7 +62,13 @@ Do not compute missing values, only report what is written."""
 
 
 class AIExtractionError(RuntimeError):
-    pass
+    """message_ar: a short Arabic explanation for the accountant."""
+
+    def __init__(self, message: str, message_ar: str = "", transient: bool = False, code: int = 0):
+        super().__init__(message)
+        self.message_ar = message_ar or message
+        self.transient = transient
+        self.code = code
 
 
 # --------------------------------------------------------------------- config
@@ -146,10 +158,20 @@ def _post(url: str, body: dict, headers: dict, timeout: int) -> dict:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
         if exc.code == 429:
-            raise AIExtractionError(f"Rate limit reached (free tiers allow few requests per minute): {detail}") from exc
-        raise AIExtractionError(f"API error {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise AIExtractionError(f"Network error: {exc.reason}") from exc
+            raise AIExtractionError(
+                f"Rate limit reached (free tiers allow few requests per minute): {detail}",
+                "وصلت لحد الطلبات المسموح بيه في الدقيقة (الخطة المجانية محدودة).", True, 429) from exc
+        if exc.code in TRANSIENT_CODES:
+            raise AIExtractionError(f"API error {exc.code}: {detail}",
+                                    "خدمة الذكاء الاصطناعي عليها ضغط دلوقتي.", True, exc.code) from exc
+        if exc.code in (401, 403):
+            raise AIExtractionError(f"API error {exc.code}: {detail}",
+                                    "مفتاح الذكاء الاصطناعي غلط أو مالوش صلاحية — راجع ملف .env.", False, exc.code) from exc
+        raise AIExtractionError(f"API error {exc.code}: {detail}", "", False, exc.code) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise AIExtractionError(f"Network error: {reason}", "مفيش اتصال بالإنترنت أو الخدمة مش بترد.",
+                                True) from exc
 
 
 # ------------------------------------------------------------------ providers
@@ -221,8 +243,32 @@ def _openai_compatible(path: Path, model: Optional[str], timeout: int) -> str:
 _PROVIDERS = {"anthropic": _anthropic, "gemini": _gemini, "openai": _openai_compatible}
 
 
-def extract_with_ai(path: Path, model: str | None = None, timeout: int = 120) -> dict:
+def _models_to_try(name: str, model: Optional[str]) -> list[Optional[str]]:
+    if name != "gemini" or model:
+        return [model]
+    main = os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
+    extra = os.environ.get("GEMINI_FALLBACK_MODELS", GEMINI_FALLBACK_MODELS)
+    models = [main] + [m.strip() for m in extra.split(",") if m.strip() and m.strip() != main]
+    return models
+
+
+def extract_with_ai(path: Path, model: str | None = None, timeout: int = 120,
+                    delays: tuple = RETRY_DELAYS) -> dict:
+    """Retries temporary errors (overloaded / rate limit / network), then tries Gemini's fallback models."""
     name = provider()
     if not name:
         raise AIExtractionError("No AI provider configured (ANTHROPIC_API_KEY, GEMINI_API_KEY or OPENAI_BASE_URL)")
-    return _parse_json(_PROVIDERS[name](Path(path), model, timeout))
+    last: Optional[AIExtractionError] = None
+    for candidate in _models_to_try(name, model):
+        for attempt in range(len(delays) + 1):
+            try:
+                return _parse_json(_PROVIDERS[name](Path(path), candidate, timeout))
+            except AIExtractionError as exc:
+                last = exc
+                if exc.code == 404 and candidate != model:
+                    break  # this fallback model name doesn't exist for the key: try the next one
+                if not exc.transient:
+                    raise
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
+    raise last

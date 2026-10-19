@@ -90,8 +90,11 @@ def _read_with_ai(inv: Invoice, path: Path) -> bool:
     try:
         data = ai_vision.extract_with_ai(readable)
     except ai_vision.AIExtractionError as exc:
+        why = exc.message_ar if getattr(exc, "message_ar", "") and exc.message_ar != str(exc) else str(exc)
         inv.add_issue("warning", "ai_failed", f"AI extraction failed: {exc}",
-                      f"القراءة بالذكاء الاصطناعي فشلت: {exc}")
+                      f"القراءة بالذكاء الاصطناعي ماشتغلتش: {why}"
+                      + (" اتقرت بالقراءة المجانية بدلها — دوس «اقرا الملف من جديد» بعد شوية لو عايز قراءة أدق."
+                         if getattr(exc, "transient", False) else ""))
         return False
     finally:
         if tmp and tmp.exists():
