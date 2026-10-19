@@ -57,6 +57,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
+    try:  # pick up AI keys from .env, like the web app does
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
+    from .extractors import ai_vision, ocr
+
+    reader = ai_vision.provider_label() if not args.no_ai and ai_vision.is_available() else None
+    print(f"Reader: {reader or ('free OCR' if not args.no_ocr and ocr.is_available() else 'none')}")
     files = collect_files(args.inputs)
     if not files:
         print("No supported files found (pdf, jpg, png, webp, tif).", file=sys.stderr)
