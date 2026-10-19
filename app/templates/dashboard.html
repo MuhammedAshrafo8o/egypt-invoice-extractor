@@ -35,7 +35,35 @@
     </div>
     <div class="fact"><span class="label">عملاء جاهزين للإقرار</span><span class="value">{{ totals.ready }} من {{ totals.clients }}</span></div>
     <div class="fact"><span class="label">فواتير {{ period|period_label }}</span><span class="value">{{ totals.invoices }}</span></div>
+    {% if stats.auto_read %}
+    <div class="fact saved" title="حساب تقريبي: دقيقة ونص لكل فاتورة كانت هتتكتب بالإيد في Excel">
+      <span class="label">وقت وفّره السيستم الشهر ده</span>
+      <span class="value">{% if hours_saved >= 1 %}حوالي {{ hours_saved }} ساعة{% else %}حوالي {{ (hours_saved * 60)|round|int }} دقيقة{% endif %}</span>
+    </div>
+    {% endif %}
     <div class="fact"><span class="label">صافي الضريبة لكل العملاء</span><span class="value num-text">{{ totals.net_vat|money }}</span></div>
+  </div>
+</section>
+{% endif %}
+
+{% if quiet %}
+<section class="panel">
+  <div class="panel-head">
+    <div><h2>لسه مابعتوش فواتير {{ period|period_label }}</h2>
+      <p class="muted small">ابعتلهم تذكير من الواتساب بتاعك. الرسالة جاهزة، بس دوس إرسال.</p></div>
+  </div>
+  <div class="remind-list">
+    {% for c in quiet %}
+    <div class="remind-item">
+      <div><a class="strong" href="/clients/{{ c.id }}?period={{ period }}">{{ c.name }}</a>
+        <div class="muted small">{% if c.days_since is not none %}آخر فاتورة وصلت من {{ c.days_since }} يوم{% else %}لسه ماوصلش منه أي فاتورة{% endif %}</div></div>
+      {% if c.remind_url %}
+        <a class="btn btn-small btn-whatsapp" href="{{ c.remind_url }}" target="_blank" rel="noopener">{{ icon('whatsapp') }} فكّره</a>
+      {% else %}
+        <a class="btn btn-small" href="/clients/{{ c.id }}#settings">ضيف رقم الواتساب</a>
+      {% endif %}
+    </div>
+    {% endfor %}
   </div>
 </section>
 {% endif %}
@@ -62,7 +90,8 @@
       <tr class="row-link" data-search="{{ c.name }} {{ c.tax_id or '' }}" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
         <td><a href="/clients/{{ c.id }}?period={{ period }}" class="strong">{{ c.name }}</a>
           <div class="row-note">{% if c.tax_id %}<span class="num-text">{{ c.tax_id }}</span>{% else %}من غير رقم ضريبي{% endif %}
-            {% if c.whatsapp_phone %}<span class="tag">واتساب</span>{% endif %}{% if c.eta_client_id %}<span class="tag">مربوط بالمنظومة</span>{% endif %}</div></td>
+            {% if c.whatsapp_phone %}<span class="tag">واتساب</span>{% endif %}{% if c.eta_client_id %}<span class="tag">مربوط بالمنظومة</span>{% endif %}
+            {% if c.days_since is not none and c.days_since > 20 %}<span class="tag tag-warn">مابعتش من {{ c.days_since }} يوم</span>{% endif %}</div></td>
         <td>
           {% if c.ready %}
             <span class="stamp" title="كل فواتير الشهر اتراجعت">جاهز<br>للإقرار</span>

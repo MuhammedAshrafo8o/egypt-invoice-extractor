@@ -24,6 +24,8 @@
       <button class="btn" type="submit">{{ icon('sync') }} سحب من المنظومة</button>
     </form>
     {% endif %}
+    {% if remind_url %}<a class="btn btn-whatsapp" href="{{ remind_url }}" target="_blank" rel="noopener" title="رسالة جاهزة تطلب فيها فواتير الشهر">{{ icon('whatsapp') }} اطلب الفواتير</a>{% endif %}
+    <a class="btn" href="/clients/{{ client.id }}/report?period={{ period }}" target="_blank" rel="noopener" title="صفحة للطباعة أو PDF تبعتها لصاحب الشركة">{{ icon('report') }} تقرير للعميل</a>
     <a class="btn" href="/clients/{{ client.id }}/export.xlsx?period={{ period }}">{{ icon('excel') }} تصدير Excel</a>
   </div>
 </div>
@@ -94,9 +96,21 @@
   </div>
 
   {% if invoices %}
+  {% set reviewable = invoices|selectattr('status', 'equalto', 'review')|rejectattr('approved')|list %}
+  <form method="post" action="/clients/{{ client.id }}/approve" id="bulk-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="period" value="{{ period }}">
+  </form>
+  {% if reviewable %}
+  <div class="bulk-bar" id="bulk-bar">
+    <label class="check"><input type="checkbox" id="pick-all"> <span>اختار كل اللي محتاج نظرة بس ({{ reviewable|length }})</span></label>
+    <span class="count" id="pick-count"></span>
+    <button class="btn btn-stamp btn-small" type="submit" form="bulk-form" id="bulk-approve" disabled>اعتماد المحدد</button>
+  </div>
+  {% endif %}
   <div class="table-wrap">
   <table class="table">
     <thead><tr>
+      {% if reviewable %}<th class="pick"></th>{% endif %}
       <th>الحالة</th><th>الطرف الآخر</th><th>التاريخ</th><th>رقم الفاتورة</th>
       <th class="num">قبل الضريبة</th><th class="num">الضريبة</th><th class="num">الإجمالي</th><th></th>
     </tr></thead>
@@ -105,6 +119,9 @@
       {% set other = inv.buyer_name if inv.direction == 'sale' else inv.supplier_name %}
       {% set first = inv.issues|selectattr('level', 'equalto', 'error')|first or inv.issues|first %}
       <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}'">
+        {% if reviewable %}<td class="pick" onclick="event.stopPropagation()">
+          {% if inv.status == 'review' and not inv.approved %}<input type="checkbox" name="ids" value="{{ inv.id }}" form="bulk-form" class="pick-one" aria-label="اختار الفاتورة">{% endif %}
+        </td>{% endif %}
         <td>{% if inv.approved %}<span class="chip chip-approved">معتمدة</span>
             {% else %}<span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span>{% endif %}</td>
         <td><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
@@ -177,6 +194,20 @@
     zone.addEventListener(e, function (ev) { ev.preventDefault(); zone.classList.remove('over'); });
   });
   zone.addEventListener('drop', function (ev) { input.files = ev.dataTransfer.files; go(); });
+
+  // bulk approve: only invoices with warnings can be picked (errors must be fixed one by one)
+  var all = document.getElementById('pick-all');
+  if (all) {
+    var boxes = document.querySelectorAll('.pick-one');
+    var btn = document.getElementById('bulk-approve'), count = document.getElementById('pick-count');
+    function sync() {
+      var n = Array.prototype.filter.call(boxes, function (b) { return b.checked; }).length;
+      btn.disabled = n === 0; count.textContent = n ? n + ' محددة' : '';
+      all.checked = n === boxes.length;
+    }
+    all.addEventListener('change', function () { boxes.forEach(function (b) { b.checked = all.checked; }); sync(); });
+    boxes.forEach(function (b) { b.addEventListener('change', sync); });
+  }
 })();
 </script>
 {% endblock %}

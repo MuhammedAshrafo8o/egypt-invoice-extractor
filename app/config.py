@@ -43,6 +43,8 @@ class Settings:
     eta_env: str  # "preprod" or "prod"
     # Day of the month after the tax period when the VAT return is due (0 = last day of that month)
     vat_deadline_day: int = 0
+    # The business WhatsApp number clients send invoices to (shown in reminder messages)
+    whatsapp_display_number: str = ""
 
     @property
     def whatsapp_enabled(self) -> bool:
@@ -79,4 +81,5 @@ def load_settings() -> Settings:
         whatsapp_api_version=os.environ.get("WHATSAPP_API_VERSION", "v22.0"),
         eta_env=os.environ.get("ETA_ENV", "preprod"),
         vat_deadline_day=int(os.environ.get("VAT_DEADLINE_DAY", "0") or 0),
+        whatsapp_display_number=os.environ.get("WHATSAPP_DISPLAY_NUMBER", ""),
     )

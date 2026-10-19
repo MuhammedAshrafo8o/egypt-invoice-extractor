@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS invoices (
 CREATE INDEX IF NOT EXISTS idx_invoices_client_period ON invoices(client_id, period);
 CREATE INDEX IF NOT EXISTS idx_invoices_uuid ON invoices(eta_uuid);
 
+-- Counterparties the accountant has approved before (suppliers and customers), per office.
+CREATE TABLE IF NOT EXISTS parties (
+    accountant_id INTEGER NOT NULL REFERENCES accountants(id) ON DELETE CASCADE,
+    tax_id        TEXT NOT NULL,
+    name          TEXT,
+    invoice_count INTEGER NOT NULL DEFAULT 0,
+    last_seen     TEXT NOT NULL,
+    PRIMARY KEY (accountant_id, tax_id)
+);
+
 CREATE TABLE IF NOT EXISTS whatsapp_messages (
     message_id  TEXT PRIMARY KEY,
     phone       TEXT NOT NULL,
@@ -199,7 +209,8 @@ class Database:
                   SUM(CASE WHEN i.direction = 'purchase' AND (i.status != 'error' OR i.approved = 1)
                            THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS input_vat,
                   SUM(CASE WHEN i.direction = 'sale' AND (i.status != 'error' OR i.approved = 1)
-                           THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS output_vat
+                           THEN COALESCE(i.vat_amount, 0) ELSE 0 END) AS output_vat,
+                  (SELECT MAX(created_at) FROM invoices WHERE client_id = c.id) AS last_received
                 FROM clients c
                 LEFT JOIN invoices i ON i.client_id = c.id AND i.period = ?
                 WHERE c.accountant_id = ?
@@ -269,6 +280,52 @@ class Database:
         sql += " ORDER BY COALESCE(invoice_date, created_at) DESC, id DESC"
         with self.connect() as conn:
             return [_invoice_dict(r) for r in conn.execute(sql, args).fetchall()]
+
+    # ----------------------------------------------------------- party memory
+    def remember_party(self, accountant_id: int, tax_id: Optional[str], name: Optional[str]) -> None:
+        if not tax_id or len(tax_id) != 9:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO parties(accountant_id, tax_id, name, invoice_count, last_seen) VALUES (?,?,?,1,?)
+                ON CONFLICT(accountant_id, tax_id) DO UPDATE SET
+                  name = COALESCE(excluded.name, parties.name),
+                  invoice_count = parties.invoice_count + 1,
+                  last_seen = excluded.last_seen
+                """, (accountant_id, tax_id, (name or "").strip() or None, now()))
+
+    def known_parties(self, accountant_id: int) -> dict:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT tax_id, name, invoice_count FROM parties WHERE accountant_id = ?",
+                                (accountant_id,)).fetchall()
+        return {r["tax_id"]: dict(r) for r in rows}
+
+    def approve_many(self, client_id: int, ids: list[int]) -> list[dict]:
+        """Approve the given invoices of one client, skipping any with errors. Returns the approved rows."""
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        with self.connect() as conn:
+            rows = conn.execute(f"SELECT * FROM invoices WHERE client_id = ? AND id IN ({marks}) "
+                                f"AND status != 'error' AND approved = 0", (client_id, *ids)).fetchall()
+            conn.executemany("UPDATE invoices SET approved = 1, updated_at = ? WHERE id = ?",
+                             [(now(), r["id"]) for r in rows])
+        return [_invoice_dict(r) for r in rows]
+
+    def work_stats(self, accountant_id: int, period: str) -> dict:
+        """Invoices the system read for the accountant this month (to show the time it saved)."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN i.channel = 'eta_sync' THEN 1 ELSE 0 END) AS from_eta,
+                  SUM(CASE WHEN i.channel = 'whatsapp' THEN 1 ELSE 0 END) AS from_whatsapp,
+                  SUM(CASE WHEN i.source_type IS NOT NULL AND i.source_type != 'unknown' THEN 1 ELSE 0 END) AS auto_read
+                FROM invoices i JOIN clients c ON c.id = i.client_id
+                WHERE c.accountant_id = ? AND i.period = ?
+                """, (accountant_id, period)).fetchone()
+        return {k: row[k] or 0 for k in row.keys()}
 
     def pending_invoices(self, accountant_id: int, limit: int = 500) -> list[dict]:
         """Every invoice that still needs the accountant, across all clients (the review queue)."""

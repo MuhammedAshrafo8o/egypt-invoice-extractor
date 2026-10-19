@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>تقرير {{ period|period_label }} | {{ client.name }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    body { background: #e9ece8; }
+    .sheet { max-width: 820px; margin: 28px auto; background: #fff; border-radius: 12px; padding: 44px 48px; border: 1px solid var(--rule); }
+    .sheet-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; border-bottom: 2px solid var(--ledger); padding-bottom: 18px; }
+    .office { font-weight: 700; color: var(--ledger); font-size: 1.15rem; }
+    .doc-title { font-size: 1.6rem; font-weight: 600; margin-top: 18px; }
+    .meta { color: var(--ink-2); margin-top: 4px; }
+    .answer { margin: 26px 0 8px; padding: 22px 24px; border-radius: 12px; background: #f3f7f4; display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+    .answer .label { color: var(--ink-2); }
+    .answer .amount { font-size: 2rem; font-weight: 700; color: var(--ledger); }
+    .answer.credit .amount { color: var(--stamp); }
+    .lines { width: 100%; border-collapse: collapse; margin-top: 18px; }
+    .lines td { padding: 10px 0; border-bottom: 1px solid var(--rule-2); }
+    .lines td:last-child { text-align: left; font-weight: 600; direction: ltr; font-variant-numeric: tabular-nums; }
+    h3 { font-size: 1rem; margin: 30px 0 10px; }
+    .todo { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+    .todo li { padding: 10px 14px; background: var(--warn-soft); border-radius: 8px; font-size: .9rem; }
+    .todo b { font-weight: 600; }
+    .inv { width: 100%; border-collapse: collapse; font-size: .84rem; }
+    .inv th { text-align: right; color: var(--muted); font-weight: 500; padding: 6px 4px; border-bottom: 1px solid var(--rule); }
+    .inv td { padding: 7px 4px; border-bottom: 1px solid var(--rule-2); }
+    .inv .n { text-align: left; direction: ltr; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .foot { margin-top: 30px; color: var(--muted); font-size: .8rem; border-top: 1px solid var(--rule-2); padding-top: 14px; }
+    .print-bar { max-width: 820px; margin: 18px auto 0; display: flex; gap: 8px; justify-content: flex-start; }
+    @media print {
+      body { background: #fff; }
+      .print-bar { display: none; }
+      .sheet { margin: 0; border: 0; padding: 0; max-width: none; }
+      .answer, .todo li { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+    @media (max-width: 600px) { .sheet { padding: 24px 18px; margin: 12px; } .answer { flex-direction: column; align-items: flex-start; } }
+  </style>
+</head>
+<body>
+<div class="print-bar">
+  <button class="btn btn-primary" onclick="window.print()">طباعة أو حفظ PDF</button>
+  <a class="btn" href="/clients/{{ client.id }}?period={{ period }}">رجوع</a>
+</div>
+
+<article class="sheet">
+  <header class="sheet-head">
+    <div>
+      <div class="office">{{ user.name }}</div>
+      <div class="doc-title">ضريبة القيمة المضافة عن {{ period|period_label }}</div>
+      <div class="meta">{{ client.name }}{% if client.tax_id %}، رقم التسجيل <span class="num-text">{{ client.tax_id }}</span>{% endif %}</div>
+    </div>
+    <div class="meta small" style="text-align:left">اتجهز يوم<br><span class="num-text">{{ today.isoformat()|dmy }}</span></div>
+  </header>
+
+  <div class="answer {% if summary.net_vat < 0 %}credit{% endif %}">
+    <div>
+      <div class="label">{% if summary.net_vat >= 0 %}الضريبة المستحقة للسداد{% else %}رصيد دائن لصالحك (بيترحّل للشهر الجاي){% endif %}</div>
+      {% if deadline.period == period %}<div class="small muted">آخر ميعاد للإقرار <span class="num-text">{{ deadline.due.isoformat()|dmy }}</span></div>{% endif %}
+    </div>
+    <div class="amount num-text">{{ (summary.net_vat|abs)|money }} ج.م</div>
+  </div>
+
+  <table class="lines">
+    <tr><td>ضريبة على المبيعات ({{ summary.sales.count }} فاتورة بقيمة {{ summary.sales.subtotal|money }})</td><td>{{ summary.sales.vat|money }}</td></tr>
+    <tr><td>ضريبة على المشتريات بتتخصم ({{ summary.purchases.count }} فاتورة بقيمة {{ summary.purchases.subtotal|money }})</td><td>{{ summary.purchases.vat|money }}</td></tr>
+    <tr><td><b>الصافي</b></td><td>{{ summary.net_vat|money }}</td></tr>
+  </table>
+
+  {% if open_items %}
+  <h3>محتاجين منك ({{ open_items|length }})</h3>
+  <p class="muted small" style="margin-bottom:10px">الفواتير دي مش داخلة في الحساب لحد ما تتظبط. ابعت صورة أوضح أو أكّد البيانات.</p>
+  <ul class="todo">
+    {% for inv in open_items %}
+      {% set first = inv.issues|selectattr('level', 'equalto', 'error')|first %}
+      <li><b><bdi>{{ inv.supplier_name or inv.buyer_name or inv.original_filename or 'فاتورة' }}</bdi></b>{% if inv.total %} بقيمة <span class="num-text">{{ inv.total|money }}</span>{% endif %}{% if first %}: {{ first.message_ar or first.message }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% set counted = invoices|rejectattr('status', 'equalto', 'error')|list + invoices|selectattr('status', 'equalto', 'error')|selectattr('approved')|list %}
+  {% if counted %}
+  <h3>الفواتير المحسوبة ({{ counted|length }})</h3>
+  <table class="inv">
+    <thead><tr><th>التاريخ</th><th>الطرف التاني</th><th>النوع</th><th class="n">قبل الضريبة</th><th class="n">الضريبة</th></tr></thead>
+    <tbody>
+    {% for inv in counted|sort(attribute='invoice_date') %}
+      <tr><td class="num-text">{{ inv.invoice_date|dmy }}</td>
+        <td><bdi>{{ (inv.buyer_name if inv.direction == 'sale' else inv.supplier_name) or '—' }}</bdi></td>
+        <td>{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</td>
+        <td class="n">{{ inv.subtotal|money }}</td><td class="n">{{ inv.vat_amount|money }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <p class="foot">التقرير ده اتجهز بواسطة {{ user.name }} من الفواتير اللي وصلت لحد النهارده. الأرقام النهائية هي اللي في الإقرار المقدَّم لمصلحة الضرائب.</p>
+</article>
+</body>
+</html>

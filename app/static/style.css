@@ -289,6 +289,20 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
 .queue-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .queue-bar .bar { max-width: 260px; }
 
+/* ------------------------------------------------------------- reminders */
+.remind-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.remind-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--rule-2); border-inline-start: 1px solid var(--rule-2); }
+.btn-whatsapp { background: #e7f6ec; border-color: #bfe6cc; color: #12703b; }
+.btn-whatsapp:hover { background: #d8f0e1; }
+.tag-warn { background: var(--warn-soft); color: var(--warn); }
+.fact.saved .value { color: var(--ledger); }
+
+/* ------------------------------------------------------------ bulk approve */
+.bulk-bar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--stamp-soft); border-bottom: 1px solid var(--rule-2); }
+.bulk-bar .count { color: var(--stamp); font-weight: 600; }
+.table td.pick, .table th.pick { width: 36px; padding-inline-end: 0; }
+.pick input { width: 17px; height: 17px; min-height: 0; accent-color: var(--stamp); cursor: pointer; }
+
 /* ------------------------------------------------------------ review list */
 .group-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; background: #fbfcfa; border-bottom: 1px solid var(--rule-2); }
 

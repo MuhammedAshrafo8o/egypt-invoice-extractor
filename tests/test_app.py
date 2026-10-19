@@ -287,6 +287,80 @@ class InvoiceFlowTests(AppTestCase):
         self.assertEqual(self.db.list_invoices(cid), [])
 
 
+class AccountantValueTests(AppTestCase):
+    """Features that save the accountant time beyond reading invoices."""
+
+    def test_party_memory_fills_names_and_flags_near_miss_tax_ids(self):
+        from invoice_extractor.models import Invoice
+        s = self.session("memory@x.com")
+        cid = self.create_client(s, "شركة الدلتا", "300112455")
+        client = self.db.get_client(cid)
+        self.upload(s, cid, "01_digital_ok.pdf")
+        inv = self.db.list_invoices(cid)[0]
+        self.app.state.service.approve(inv)  # supplier 512334901 is now known
+        service = self.app.state.service
+
+        known = Invoice(source_file="x", supplier_tax_id="512334901")
+        service._apply_party_memory(client, known)
+        self.assertEqual(known.supplier_name, "Nile Office Supplies LLC")
+
+        typo = Invoice(source_file="y", supplier_tax_id="512334907", supplier_name="Nile Office")
+        service._apply_party_memory(client, typo)
+        self.assertIn("supplier_tax_id_near_known", [i.code for i in typo.issues])
+        self.assertEqual(typo.status, "review")
+
+        unrelated = Invoice(source_file="z", supplier_tax_id="777888999")
+        service._apply_party_memory(client, unrelated)
+        self.assertEqual(unrelated.issues, [])
+
+    def test_bulk_approve_skips_errors(self):
+        s = self.session("bulk@x.com")
+        cid = self.create_client(s, "عميل", "300112455")
+        self.upload(s, cid, "04_eta_einvoice.pdf", "02_total_mismatch.pdf")
+        inv = {i["original_filename"]: i for i in self.db.list_invoices(cid)}
+        token = self.csrf(s, f"{self.base}/clients/{cid}")
+        r = s.post(f"{self.base}/clients/{cid}/approve", data={
+            "csrf": token, "period": PERIOD,
+            "ids": [inv["04_eta_einvoice.pdf"]["id"], inv["02_total_mismatch.pdf"]["id"]]})
+        self.assertIn("اتعتمدت 1 فاتورة", r.text)
+        self.assertIn("ماتعتمدتش", r.text)
+        self.assertEqual(self.db.get_invoice(inv["04_eta_einvoice.pdf"]["id"])["approved"], 1)
+        self.assertEqual(self.db.get_invoice(inv["02_total_mismatch.pdf"]["id"])["approved"], 0)
+
+    def test_client_report_and_whatsapp_links(self):
+        s = self.session("report@x.com", name="مكتب الأمل")
+        cid = self.create_client(s, "شركة الدلتا", "300112455", "01022223333")
+        quiet = self.create_client(s, "عميل ساكت", "", "01044445555")
+        self.upload(s, cid, "01_digital_ok.pdf", "02_total_mismatch.pdf")
+
+        report = s.get(f"{self.base}/clients/{cid}/report?period={PERIOD}").text
+        self.assertIn("مكتب الأمل", report)
+        self.assertIn("رصيد دائن", report)            # purchases only → credit
+        self.assertIn("محتاجين منك (1)", report)       # only the invoice with a wrong total
+        self.assertNotIn("القراءة المجانية", report)    # internal notes never reach the client
+        self.assertIn("1,400.00", report)
+
+        home = s.get(self.base + "/").text
+        self.assertIn("لسه مابعتوش فواتير", home)
+        self.assertIn("https://wa.me/201044445555?text=", home)
+        self.assertIn("وقت وفّره السيستم", home)
+
+        bad = next(i for i in self.db.list_invoices(cid) if i["status"] == "error")
+        page = s.get(f"{self.base}/invoices/{bad['id']}").text
+        self.assertIn("https://wa.me/201022223333?text=", page)
+        self.assertIn("اسأل العميل على واتساب", page)
+
+    def test_review_queue_steps_to_next_invoice(self):
+        s = self.session("queue@x.com")
+        cid = self.create_client(s, "عميل", "300112455")
+        self.upload(s, cid, "04_eta_einvoice.pdf", "09_arabic_photo.jpg", "07_arabic.pdf")
+        queue = s.get(self.base + "/review").text
+        ids = list(dict.fromkeys(re.findall(r"/invoices/(\d+)\?queue=1", queue)))
+        self.assertGreaterEqual(len(ids), 1)
+        page = s.get(f"{self.base}/invoices/{ids[0]}?queue=1").text
+        self.assertIn("فاتورة 1 من", page)
+
+
 class WhatsAppTests(AppTestCase):
     def post_webhook(self, payload, secret=APP_SECRET):
         body = json.dumps(payload).encode()

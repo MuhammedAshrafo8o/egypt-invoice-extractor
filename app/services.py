@@ -63,6 +63,46 @@ def filing_deadline(deadline_day: int = 0, today: Optional[date] = None) -> dict
     return {"period": period_month.strftime("%Y-%m"), "due": due, "days_left": (due - today).days}
 
 
+def near_miss(a: str, b: str) -> bool:
+    """True when two IDs differ by one digit or by two swapped neighbouring digits (typical misreads)."""
+    if not a or not b or len(a) != len(b) or a == b:
+        return False
+    diff = [i for i in range(len(a)) if a[i] != b[i]]
+    if len(diff) == 1:
+        return True
+    return (len(diff) == 2 and diff[1] == diff[0] + 1
+            and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+
+
+MINUTES_PER_INVOICE = 1.5  # typing one invoice by hand into Excel, as accountants estimate it
+
+
+def wa_link(phone: Optional[str], text: str) -> Optional[str]:
+    """Opens the accountant's own WhatsApp with the message ready to send (no API needed)."""
+    from urllib.parse import quote
+
+    return f"https://wa.me/{phone}?text={quote(text)}" if phone else None
+
+
+def reminder_text(client_name: str, office: str, period_label: str, days_left: Optional[int] = None,
+                  intake_number: str = "") -> str:
+    lines = [f"أهلًا {client_name}،",
+             f"محتاجين فواتير المشتريات والمبيعات بتاعة {period_label} عشان نجهز الإقرار."]
+    if days_left is not None and days_left >= 0:
+        lines.append(f"فاضل {days_left} يوم على ميعاد الإقرار.")
+    lines.append(f"صوّر الفواتير وابعتها على الرقم {intake_number}." if intake_number
+                 else "صوّر الفواتير وابعتهالي هنا.")
+    lines.append(f"شكرًا، {office}")
+    return "\n".join(lines)
+
+
+def invoice_question_text(client_name: str, office: str, invoice: dict, problem: str) -> str:
+    what = invoice.get("supplier_name") or invoice.get("original_filename") or "الفاتورة"
+    when = f" بتاريخ {invoice['invoice_date']}" if invoice.get("invoice_date") else ""
+    return (f"أهلًا {client_name}،\nبخصوص فاتورة {what}{when}:\n{problem}\n"
+            f"ممكن تبعتلي صورة أوضح أو تأكدلي البيانات؟\nشكرًا، {office}")
+
+
 def valid_period(value: Optional[str]) -> str:
     if value and len(value) == 7 and value[4] == "-" and value[:4].isdigit() and value[5:].isdigit():
         return value
@@ -102,6 +142,7 @@ class InvoiceService:
     def _finalize(self, client, inv: Invoice, exclude_id: Optional[int] = None,
                   direction: Optional[str] = None, period: Optional[str] = None) -> dict:
         """Cross-invoice checks (duplicates in the DB) and the row to store."""
+        self._apply_party_memory(client, inv)
         record = {name: getattr(inv, name) for name in Invoice.FIELDS}
         record.update(eta_uuid=inv.eta_uuid, eta_url=inv.eta_url, source_type=inv.source_type)
         duplicate = self.db.find_duplicate(client["id"], record, exclude_id=exclude_id)
@@ -116,6 +157,43 @@ class InvoiceService:
             issues_json=json.dumps([i.to_dict() for i in inv.issues], ensure_ascii=False),
         )
         return record
+
+    # ------------------------------------------------------- party memory
+    def _apply_party_memory(self, client, inv: Invoice) -> None:
+        """Fill names of known suppliers/customers and flag tax IDs one digit away from a known one."""
+        known = self.db.known_parties(client["accountant_id"])
+        if not known:
+            return
+        for id_attr, name_attr, label in (("supplier_tax_id", "supplier_name", "المورد"),
+                                          ("buyer_tax_id", "buyer_name", "المشتري")):
+            tax_id = getattr(inv, id_attr)
+            if not tax_id or tax_id == client["tax_id"]:
+                continue
+            if tax_id in known:
+                if not getattr(inv, name_attr) and known[tax_id]["name"]:
+                    setattr(inv, name_attr, known[tax_id]["name"])
+                continue
+            close = [p for t, p in known.items() if near_miss(tax_id, t)]
+            if close:
+                best = max(close, key=lambda p: p["invoice_count"])
+                inv.add_issue(
+                    "warning", f"{id_attr}_near_known",
+                    f"{label} tax ID {tax_id} is one digit away from known party {best['name']} ({best['tax_id']}).",
+                    f"الرقم الضريبي لـ{label} {tax_id} قريب جدًا من رقم {best['name'] or 'طرف معروف'} "
+                    f"({best['tax_id']}) اللي اتعامل معاه قبل كده — غالبًا رقم اتقرا غلط.")
+                set_status(inv)
+
+    def remember_parties(self, client, invoice: dict) -> None:
+        for tax_attr, name_attr in (("supplier_tax_id", "supplier_name"), ("buyer_tax_id", "buyer_name")):
+            tax_id = invoice.get(tax_attr)
+            if tax_id and tax_id != client["tax_id"]:
+                self.db.remember_party(client["accountant_id"], tax_id, invoice.get(name_attr))
+
+    def approve_many(self, client, ids: list[int]) -> int:
+        approved = self.db.approve_many(client["id"], ids)
+        for invoice in approved:
+            self.remember_parties(client, invoice)
+        return len(approved)
 
     # ------------------------------------------------------------ uploads
     def store_file(self, client_id: int, filename: str, content: bytes) -> Path:
@@ -180,11 +258,14 @@ class InvoiceService:
         has_errors = inv.status == "error"
         record["approved"] = 1 if approve and not has_errors else 0
         self.db.update_invoice(invoice["id"], record)
+        if record["approved"]:
+            self.remember_parties(client, record)
 
     def approve(self, invoice: dict) -> bool:
         if invoice["status"] == "error":
             return False
         self.db.update_invoice(invoice["id"], {"approved": 1})
+        self.remember_parties(self.db.get_client(invoice["client_id"]), invoice)
         return True
 
     # ------------------------------------------------------------- ETA sync
@@ -230,6 +311,7 @@ class InvoiceService:
         record.update(channel="eta_sync", original_filename=inv.source_file)
         if inv.status != "error":
             record["approved"] = 1  # official record, no manual review needed
+            self.remember_parties(client, record)
         return self.db.insert_invoice(client["id"], record)
 
     # -------------------------------------------------------------- summary

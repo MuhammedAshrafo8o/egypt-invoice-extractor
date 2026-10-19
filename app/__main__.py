@@ -40,9 +40,13 @@ def create_demo() -> None:
     client_id = db.create_client(uid, "شركة الدلتا للتجارة", "300112455", "01001234567",
                                  "عميل تجريبي — بياناته وهمية")
     seller_id = db.create_client(uid, "مكتبة النيل (بيع)", "512334901", "", "عميل تجريبي بيبيع")
+    db.create_client(uid, "مطعم السلطان", "421907335", "01112223344", "عميل تجريبي لسه مابعتش فواتير")
     client = db.get_client(client_id)
     seller = db.get_client(seller_id)
-    for path in sorted((root / "samples" / "invoices").iterdir()):
+    from invoice_extractor.pipeline import SUPPORTED_EXTS
+
+    files = [p for p in sorted((root / "samples" / "invoices").iterdir()) if p.suffix.lower() in SUPPORTED_EXTS]
+    for path in files:
         target = seller if path.name.startswith("01_") else client
         service.add_file(target, path.name, path.read_bytes())
         if path.name.startswith("01_"):

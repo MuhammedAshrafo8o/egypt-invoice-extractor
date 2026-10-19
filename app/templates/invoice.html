@@ -126,6 +126,7 @@
         <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="reprocess">
         <button class="link-btn" type="submit">اقرا الملف من جديد</button></form>
       {% endif %}
+      {% if ask_url and not invoice.approved %}<a class="link-btn" href="{{ ask_url }}" target="_blank" rel="noopener">اسأل العميل على واتساب</a>{% endif %}
       {% if invoice.eta_url %}<a class="link-btn" href="{{ invoice.eta_url }}" target="_blank" rel="noopener">افتح في المنظومة</a>{% endif %}
       <form method="post" action="/invoices/{{ invoice.id }}/edit" class="inline" onsubmit="return confirm('تمسح الفاتورة دي؟')">
         <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="delete">

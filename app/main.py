@@ -26,7 +26,8 @@ from . import whatsapp
 from .config import Settings, load_settings
 from .db import Database
 from .exports import build_workbook
-from .services import InvoiceService, UploadError, current_period, filing_deadline, valid_period
+from .services import (MINUTES_PER_INVOICE, InvoiceService, UploadError, current_period, filing_deadline,
+                       invoice_question_text, reminder_text, valid_period, wa_link)
 
 log = logging.getLogger(__name__)
 HERE = Path(__file__).parent
@@ -253,9 +254,22 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             "ready": sum(1 for c in clients if c["ready"]),
             "net_vat": round(sum(c["net_vat"] for c in clients), 2),
         }
+        deadline = filing_deadline(settings.vat_deadline_day)
+        stats = db.work_stats(request.state.user["id"], period)
+        minutes = stats["auto_read"] * MINUTES_PER_INVOICE
+        office = request.state.user["name"]
+        days_left = deadline["days_left"] if deadline["period"] == period else None
+        for c in clients:
+            c["remind_url"] = wa_link(c["whatsapp_phone"], reminder_text(
+                c["name"], office, period_label(period), days_left, settings.whatsapp_display_number))
+        today = date.today()
+        for c in clients:
+            last = c.get("last_received")
+            c["days_since"] = (today - date.fromisoformat(last[:10])).days if last else None
+        quiet = [c for c in clients if not c["invoice_count"]]
         return render(request, "dashboard.html", clients=clients, period=period, nav="home",
-                      periods=recent_periods(), totals=totals,
-                      deadline=filing_deadline(settings.vat_deadline_day))
+                      periods=recent_periods(), totals=totals, deadline=deadline, quiet=quiet,
+                      stats=stats, hours_saved=round(minutes / 60, 1))
 
     @login_required
     async def review_queue(request: Request):
@@ -289,7 +303,12 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         status = request.query_params.get("status") or None
         direction = request.query_params.get("direction") or None
         invoices = db.list_invoices(client["id"], period, status, direction)
+        deadline = filing_deadline(settings.vat_deadline_day)
+        remind_url = wa_link(client["whatsapp_phone"], reminder_text(
+            client["name"], request.state.user["name"], period_label(period),
+            deadline["days_left"] if deadline["period"] == period else None, settings.whatsapp_display_number))
         return render(request, "client.html", client=client, invoices=invoices, period=period, nav="clients",
+                      remind_url=remind_url,
                       periods=recent_periods(db.periods(client["id"])), status=status, direction=direction,
                       summary=service.summary(client["id"], period))
 
@@ -357,6 +376,34 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         return redirect(f"/clients/{client['id']}?period={viewed_period}")
 
     @login_required
+    async def client_approve_bulk(request: Request):
+        client = get_client_or_404(request, request.path_params["client_id"])
+        form = await form_with_csrf(request)
+        ids = [int(x) for x in form.getlist("ids") if str(x).isdigit()]
+        done = service.approve_many(client, ids)
+        skipped = len(ids) - done
+        if done:
+            flash(request, f"اتعتمدت {done} فاتورة.", "success")
+        if skipped:
+            flash(request, f"{skipped} فاتورة ماتعتمدتش لأن فيها أخطاء لازم تتصلح الأول.", "error")
+        if not ids:
+            flash(request, "اختار الفواتير اللي عايز تعتمدها.", "info")
+        return redirect(f"/clients/{client['id']}?period={valid_period(form.get('period'))}")
+
+    @login_required
+    async def client_report(request: Request):
+        client = get_client_or_404(request, request.path_params["client_id"])
+        period = valid_period(request.query_params.get("period"))
+        invoices = db.list_invoices(client["id"], period)
+        # Only what the business owner can act on: invoices left out of the totals because the document
+        # itself is unclear or inconsistent. Duplicates and internal review notes stay with the accountant.
+        open_items = [i for i in invoices if i["status"] == "error" and not i["approved"]
+                      and not any(x.get("code") == "duplicate" for x in i["issues"])]
+        return render(request, "report.html", client=client, period=period, invoices=invoices,
+                      open_items=open_items, summary=service.summary(client["id"], period),
+                      deadline=filing_deadline(settings.vat_deadline_day), today=date.today())
+
+    @login_required
     async def client_export(request: Request):
         client = get_client_or_404(request, request.path_params["client_id"])
         period = valid_period(request.query_params.get("period"))
@@ -408,7 +455,13 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                 pdf.close()
             except Exception:
                 page_count = 1
+        first = next((i for i in invoice["issues"] if i.get("level") == "error"), None) or \
+            next(iter(invoice["issues"]), None)
+        problem = (first or {}).get("message_ar") or "محتاج أتأكد من بيانات الفاتورة دي."
+        ask_url = wa_link(client["whatsapp_phone"], invoice_question_text(
+            client["name"], request.state.user["name"], invoice, problem))
         return render(request, "invoice.html", invoice=invoice, client=client, next_id=ids[0] if ids else None,
+                      ask_url=ask_url,
                       is_pdf=is_pdf, page_count=page_count, has_file=bool(invoice.get("stored_path")),
                       periods=recent_periods([invoice["period"]]), queue=queue_info,
                       marked=issue_fields(invoice["issues"]), nav="review" if queue_mode else "clients")
@@ -547,6 +600,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         Route("/clients/{client_id:int}/edit", client_update, methods=["POST"]),
         Route("/clients/{client_id:int}/upload", client_upload, methods=["POST"]),
         Route("/clients/{client_id:int}/export.xlsx", client_export),
+        Route("/clients/{client_id:int}/approve", client_approve_bulk, methods=["POST"]),
+        Route("/clients/{client_id:int}/report", client_report),
         Route("/clients/{client_id:int}/eta-sync", client_eta_sync, methods=["POST"]),
         Route("/invoices/{invoice_id:int}", invoice_detail),
         Route("/invoices/{invoice_id:int}/edit", invoice_update, methods=["POST"]),
