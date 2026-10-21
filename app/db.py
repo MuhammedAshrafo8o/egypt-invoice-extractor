@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS upload_jobs (
     state         TEXT NOT NULL DEFAULT 'queued',   -- queued | working | done | failed
     invoice_id    INTEGER,
     message       TEXT,
+    reply_to      TEXT,           -- WhatsApp sender to answer once the file is read
+    message_id    TEXT,           -- WhatsApp message id
     created_at    TEXT NOT NULL,
     finished_at   TEXT
 );
@@ -137,6 +139,7 @@ class Database:
         "invoices": {"eta_draft": "TEXT", "eta_state": "TEXT", "eta_message": "TEXT",
                      "eta_long_id": "TEXT", "eta_check": "TEXT", "file_hash": "TEXT"},
         "parties": {"details_json": "TEXT"},
+        "upload_jobs": {"reply_to": "TEXT", "message_id": "TEXT"},
     }
 
     def _migrate(self, conn) -> None:
@@ -220,6 +223,10 @@ class Database:
         sets = ", ".join(f"{k} = ?" for k in values)
         with self.connect() as conn:
             conn.execute(f"UPDATE clients SET {sets} WHERE id = ?", (*values.values(), client_id))
+
+    def clients_with_eta_secret(self) -> list:
+        with self.connect() as conn:
+            return conn.execute("SELECT id, eta_client_secret FROM clients WHERE eta_client_secret IS NOT NULL").fetchall()
 
     def delete_client(self, client_id: int) -> None:
         with self.connect() as conn:
@@ -619,9 +626,10 @@ class Database:
     def add_jobs(self, client_id: int, batch: str, files: list[dict], channel: str = "upload") -> None:
         with self.connect() as conn:
             conn.executemany(
-                "INSERT INTO upload_jobs(client_id, batch, filename, stored_path, file_hash, channel, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                [(client_id, batch, f["filename"], f["stored_path"], f["file_hash"], channel, now()) for f in files])
+                "INSERT INTO upload_jobs(client_id, batch, filename, stored_path, file_hash, channel, reply_to, "
+                "message_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                [(client_id, batch, f["filename"], f["stored_path"], f["file_hash"], channel, f.get("reply_to"),
+                  f.get("message_id"), now()) for f in files])
 
     def claim_job(self) -> Optional[dict]:
         """Take the oldest queued job (atomic, so several workers never read the same file)."""
@@ -650,8 +658,8 @@ class Database:
     def batch_progress(self, client_id: int) -> Optional[dict]:
         """Progress of this client's latest upload batch, while it runs and for 10 minutes after."""
         with self.connect() as conn:
-            last = conn.execute("SELECT batch FROM upload_jobs WHERE client_id = ? ORDER BY id DESC LIMIT 1",
-                                (client_id,)).fetchone()
+            last = conn.execute("SELECT batch FROM upload_jobs WHERE client_id = ? AND channel = 'upload' "
+                                "ORDER BY id DESC LIMIT 1", (client_id,)).fetchone()
             if not last:
                 return None
             rows = conn.execute("SELECT state, filename, message, finished_at FROM upload_jobs "

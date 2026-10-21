@@ -53,6 +53,47 @@ def isolate(text: str) -> str:
     return f"\u2068{text}\u2069"
 
 
+def pdf_page_count(filename: str, content: bytes) -> int:
+    if not filename.lower().endswith(".pdf"):
+        return 1
+    try:
+        import pypdfium2 as pdfium
+        from invoice_extractor.pdfium_lock import PDFIUM_LOCK
+        with PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(content)
+            try:
+                return len(pdf)
+            finally:
+                pdf.close()
+    except Exception:
+        return 1
+
+
+def split_pdf(filename: str, content: bytes) -> list[tuple[str, bytes]]:
+    """One single-page PDF per page: 'name (صفحة 3).pdf'."""
+    import io as _io
+
+    import pypdfium2 as pdfium
+    from invoice_extractor.pdfium_lock import PDFIUM_LOCK
+    stem = filename[:-4] if filename.lower().endswith(".pdf") else filename
+    out = []
+    with PDFIUM_LOCK:
+        src = pdfium.PdfDocument(content)
+        try:
+            for i in range(len(src)):
+                dst = pdfium.PdfDocument.new()
+                try:
+                    dst.import_pages(src, [i])
+                    buf = _io.BytesIO()
+                    dst.save(buf)
+                finally:
+                    dst.close()
+                out.append((f"{stem} (صفحة {i + 1}).pdf", buf.getvalue()))
+        finally:
+            src.close()
+    return out
+
+
 def file_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -164,8 +205,11 @@ class InvoiceService:
         self.db = db
         self.settings = settings
         self.eta_client_factory = eta_client_factory
+        from .crypto import SecretBox, load_key
+        self.box = SecretBox(load_key(settings.data_dir or settings.database_path.parent))
         self._wake = threading.Event()   # set when new files are queued
         self._store_lock = threading.RLock()
+        self.job_listeners: list = []
         self._turns = threading.Condition()  # files of one batch are saved in upload order
         self._workers = []
 
@@ -174,7 +218,7 @@ class InvoiceService:
         if self.settings.eta_demo:
             return DemoETAClient(store=self.demo_store, taxpayer=client["tax_id"] or "")
         if client["eta_client_id"] and client["eta_client_secret"]:
-            return self.eta_client_factory(client["eta_client_id"], client["eta_client_secret"],
+            return self.eta_client_factory(client["eta_client_id"], self.box.decrypt(client["eta_client_secret"]),
                                            env=self.settings.eta_env)
         return None
 
@@ -286,6 +330,15 @@ class InvoiceService:
         path.write_bytes(content)
         return path
 
+    def encrypt_stored_secrets(self) -> int:
+        """Older databases kept the ETA Client Secret as plain text: encrypt those in place."""
+        done = 0
+        for row in self.db.clients_with_eta_secret():
+            if not self.box.is_encrypted(row["eta_client_secret"]):
+                self.db.update_client(row["id"], eta_client_secret=self.box.encrypt(row["eta_client_secret"]))
+                done += 1
+        return done
+
     def check_not_seen(self, client, content: bytes) -> str:
         digest = file_hash(content)
         seen = self.db.file_seen(client["id"], digest)
@@ -300,11 +353,35 @@ class InvoiceService:
         return self.process_stored(client, path, filename, channel, file_hash=digest)
 
     # ------------------------------------------------- background reading
-    def queue_files(self, client, files: list[tuple[str, bytes]], channel: str = "upload") -> dict:
-        """Store files now and read them in the background. Same file twice (in this batch or before) is skipped."""
+    MAX_PAGES_PER_UPLOAD = 200
+
+    def queue_files(self, client, files: list[tuple[str, bytes]], channel: str = "upload",
+                    split_pages: bool = False, reply_to: Optional[str] = None,
+                    message_id: Optional[str] = None) -> dict:
+        """Store files now and read them in the background. Same file twice (in this batch or before) is skipped.
+
+        split_pages: a PDF with several pages is several invoices (one per page)."""
         batch = uuidlib.uuid4().hex[:12]
-        queued, skipped, failed, seen = [], [], [], set()
+        queued, skipped, failed, seen, notes = [], [], [], set(), []
+        expanded = []
         for filename, content in files:
+            pages = pdf_page_count(filename, content)
+            if split_pages and pages > 1:
+                try:
+                    expanded.extend(split_pdf(filename, content))
+                    notes.append(f"الملف «{isolate(filename)}» اتقسم {pages} فاتورة (كل صفحة فاتورة).")
+                    continue
+                except Exception:
+                    failed.append(f"{isolate(filename)}: ماقدرناش نقسم صفحات الملف، فاترفع فاتورة واحدة.")
+            elif pages > 1:
+                notes.append(f"الملف «{isolate(filename)}» فيه {pages} صفحات واتسجل فاتورة واحدة. لو كل صفحة فاتورة "
+                             "لوحدها، امسحه وارفعه تاني مع اختيار «كل صفحة في الـ PDF فاتورة».")
+            expanded.append((filename, content))
+        if len(expanded) > self.MAX_PAGES_PER_UPLOAD:
+            return {"queued": 0, "skipped": [], "notes": [], "batch": batch, "failed": [
+                f"الرفعة دي فيها {len(expanded)} فاتورة بعد تقسيم الصفحات، والحد {self.MAX_PAGES_PER_UPLOAD}. "
+                "ارفعها على كذا مرة."]}
+        for filename, content in expanded:
             try:
                 digest = file_hash(content)
                 if digest in seen:
@@ -318,11 +395,12 @@ class InvoiceService:
                 failed.append(f"{isolate(filename)}: {exc}")
                 continue
             seen.add(digest)
-            queued.append({"filename": filename, "stored_path": str(path), "file_hash": digest})
+            queued.append({"filename": filename, "stored_path": str(path), "file_hash": digest,
+                           "reply_to": reply_to, "message_id": message_id})
         if queued:
             self.db.add_jobs(client["id"], batch, queued, channel)
             self._wake.set()
-        return {"queued": len(queued), "skipped": skipped, "failed": failed, "batch": batch}
+        return {"queued": len(queued), "skipped": skipped, "failed": failed, "batch": batch, "notes": notes}
 
     def start_workers(self, count: int = 2) -> None:
         if getattr(self, "_workers", None):
@@ -362,12 +440,19 @@ class InvoiceService:
             invoice_id = self.process_stored(client, Path(job["stored_path"]), job["filename"], job["channel"],
                                              file_hash=job["file_hash"], inv=inv)
             self.db.finish_job(job["id"], "done", invoice_id)
+            job.update(state="done", invoice_id=invoice_id)
         except Exception as exc:  # one bad file must not stop the batch
             log.exception("Reading %s failed", job["filename"])
             self.db.finish_job(job["id"], "failed", message=str(exc)[:300])
+            job.update(state="failed", message=str(exc)[:300])
         finally:
             with self._turns:
                 self._turns.notify_all()
+        for listener in self.job_listeners:  # e.g. the WhatsApp reply to the client who sent the photo
+            try:
+                listener(job)
+            except Exception:
+                log.exception("Job listener failed")
 
     def read_stored(self, client, path: Path, original_filename: str) -> Invoice:
         """The slow part (AI / OCR / ETA lookups). Safe to run for several files at once."""
@@ -441,7 +526,11 @@ class InvoiceService:
     # ------------------------------------------------------------- ETA sync
     def sync_from_eta(self, client, period: str) -> SyncResult:
         result = SyncResult()
-        eta = self.eta_client(client)
+        try:
+            eta = self.eta_client(client)
+        except ValueError as exc:  # secret can't be decrypted (encryption key changed)
+            result.errors.append(str(exc))
+            return result
         if not eta:
             result.errors.append("مفيش بيانات دخول للمنظومة للعميل ده.")
             return result
@@ -816,11 +905,15 @@ class InvoiceService:
 
         def block(direction: str) -> dict:
             rows = [i for i in counted if i["direction"] == direction]
+            unreviewed = [i for i in rows if i["status"] == "review" and not i["approved"]]
             return {
                 "count": len(rows),
                 "subtotal": round(sum(i["subtotal"] or 0 for i in rows), 2),
                 "vat": round(sum(i["vat_amount"] or 0 for i in rows), 2),
                 "total": round(sum(i["total"] or 0 for i in rows), 2),
+                # part of the totals that comes from invoices the accountant hasn't looked at yet
+                "unreviewed_count": len(unreviewed),
+                "unreviewed_vat": round(sum(i["vat_amount"] or 0 for i in unreviewed), 2),
             }
 
         purchases, sales = block("purchase"), block("sale")

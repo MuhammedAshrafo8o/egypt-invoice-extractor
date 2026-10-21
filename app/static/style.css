@@ -524,3 +524,5 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
 .batch-progress { padding: 14px 20px; margin-bottom: 18px; display: grid; gap: 10px; }
 .batch-progress .bp-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
 .batch-progress.running .bar > i { transition: width .6s ease; background: var(--stamp); }
+.hint.unreviewed { color: var(--warn); }
+.split-opt { margin: -8px 4px 18px; font-size: .9rem; color: var(--ink-2); }

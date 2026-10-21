@@ -40,16 +40,18 @@
     <div class="label">ضريبة المخرجات (المبيعات)</div>
     <div class="value num-text">{{ summary.sales.vat|money }}</div>
     <div class="hint">{{ summary.sales.count }} فاتورة بقيمة {{ summary.sales.subtotal|money }} قبل الضريبة</div>
+    {% if summary.sales.unreviewed_count %}<div class="hint unreviewed">منها <span class="num-text">{{ summary.sales.unreviewed_vat|money }}</span> من {{ summary.sales.unreviewed_count }} فاتورة لسه ماتراجعتش</div>{% endif %}
   </div>
   <div class="sum-cell">
     <div class="label">ضريبة المدخلات (المشتريات)</div>
     <div class="value num-text">{{ summary.purchases.vat|money }}</div>
     <div class="hint">{{ summary.purchases.count }} فاتورة بقيمة {{ summary.purchases.subtotal|money }} قبل الضريبة</div>
+    {% if summary.purchases.unreviewed_count %}<div class="hint unreviewed">منها <span class="num-text">{{ summary.purchases.unreviewed_vat|money }}</span> من {{ summary.purchases.unreviewed_count }} فاتورة لسه ماتراجعتش</div>{% endif %}
   </div>
   <div class="sum-cell net">
     <div class="label">صافي الضريبة {% if summary.net_vat >= 0 %}المستحق{% else %}(رصيد دائن){% endif %}</div>
     <div class="value num-text">{{ summary.net_vat|money }}</div>
-    <div class="hint">من الفواتير السليمة والمعتمدة بس</div>
+    <div class="hint">{% if summary.sales.unreviewed_count or summary.purchases.unreviewed_count %}مبدئي — فيه فواتير لسه ماتراجعتش داخلة في الحساب{% else %}من الفواتير السليمة والمعتمدة{% endif %}</div>
   </div>
   <div class="sum-close">
     {% if summary.invoice_count and not pending %}
@@ -98,6 +100,8 @@
       <span class="muted small" id="dz-hint">صور أو PDF، لحد {{ settings.max_files_per_upload }} ملف في المرة، وكل ملف بيتسجل فاتورة لوحده. الملف اللي اترفع قبل كده مش بيتكرر.</span>
     </span>
   </label>
+  <label class="check split-opt"><input type="checkbox" name="split_pages" value="1">
+    <span>كل صفحة في الـ PDF فاتورة لوحدها <span class="muted small">— لو عامل سكان لكذا فاتورة في ملف واحد. علّمها قبل ما تختار الملفات.</span></span></label>
   <button type="submit" id="dz-submit" hidden>ارفع واقرا</button>
 </form>
 

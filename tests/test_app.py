@@ -73,8 +73,11 @@ class FakeETA:
                                                  "EI-55021", 7250.0, 1015.0, issued),
     }
 
+    secrets: list = []
+
     def __init__(self, client_id, client_secret, env="preprod"):
         FakeETA.calls.append((client_id, env))
+        FakeETA.secrets.append(client_secret)
 
     def search_documents(self, start, end, direction=None, page_size=100):
         yield {"uuid": "UUIDSALE1", "status": "Valid"}
@@ -497,6 +500,11 @@ class WhatsAppTests(AppTestCase):
         self.assertEqual((inv["channel"], inv["status"], inv["total"]), ("whatsapp", "ok", 5472.0))
         self.assertTrue(self.wait_for(lambda: any(to == "201011112222" and "5,472.00" in t
                                                   for to, t in self.wa.sent)))
+        # The same photo sent again (new message) is not stored twice.
+        self.post_webhook(self.message("wamid.A2", "201011112222", media_id="media-42", filename="تاني.pdf"))
+        self.assertTrue(self.wait_for(lambda: any(to == "201011112222" and "اترفع قبل كده" in t
+                                                  for to, t in self.wa.sent)))
+        self.assertEqual(len(self.db.list_invoices(cid)), 1)
         # Meta retries the same message → ignored.
         self.post_webhook(payload)
         time.sleep(0.5)
@@ -538,8 +546,12 @@ class ETATests(AppTestCase):
         token = self.csrf(s, f"{self.base}/clients/{cid}")
         r = s.post(f"{self.base}/clients/{cid}/eta-sync", data={"csrf": token, "period": PERIOD})
         self.assertIn("اتسحب 0 فاتورة", r.text)
-        # The secret is never echoed back into the page.
+        # The secret is never echoed back into the page, is stored encrypted, and reaches the ETA in clear.
         self.assertNotIn('value="secret"', s.get(f"{self.base}/clients/{cid}").text)
+        stored = self.db.get_client(cid)["eta_client_secret"]
+        self.assertTrue(stored.startswith("enc:v1:"))
+        self.assertNotIn("secret", stored)
+        self.assertEqual(FakeETA.secrets[-1], "secret")
 
     def test_qr_invoice_pulled_from_eta(self):
         s = self.session("etaqr@x.com")
@@ -592,6 +604,42 @@ class BulkUploadTests(AppTestCase):
             settings.max_files_per_upload = old
         self.assertIn("والحد 2 ملف في المرة", r.text)
         self.assertEqual(self.db.list_invoices(cid), [])
+
+    def test_pdf_with_several_invoices_split_per_page(self):
+        import pypdfium2 as pdfium
+        merged = pdfium.PdfDocument.new()
+        for name in ("01_digital_ok.pdf", "02_total_mismatch.pdf", "07_arabic.pdf"):
+            src = pdfium.PdfDocument(str(SAMPLES / name))
+            merged.import_pages(src, [0])
+            src.close()
+        buf = io.BytesIO()
+        merged.save(buf)
+        merged.close()
+        s = self.session("bulk-split@x.com")
+        cid = self.create_client(s, "شركة الدلتا", "300112455")
+        # Without the option: one invoice, and a hint that it may hold several.
+        r = self.post_files(s, cid, [("scan.pdf", buf.getvalue())])
+        self.assertIn("فيه 3 صفحات واتسجل فاتورة واحدة", r.text)  # (single file: opened right away)
+        self.assertEqual(len(self.db.list_invoices(cid)), 1)
+        # With it: one invoice per page.
+        cid2 = self.create_client(s, "شركة الدلتا ٢", "300112455")
+        token = self.csrf(s, f"{self.base}/clients/{cid2}")
+        r = s.post(f"{self.base}/clients/{cid2}/upload", data={"csrf": token, "period": PERIOD, "split_pages": "1"},
+                   files=[("files", ("scan.pdf", buf.getvalue(), "application/pdf"))])
+        self.assertIn("اتقسم 3 فاتورة", r.text)
+        self.wait_for_reading(cid2)
+        invs = self.invoices(cid2)
+        self.assertEqual(sorted(invs), ["scan (صفحة 1).pdf", "scan (صفحة 2).pdf", "scan (صفحة 3).pdf"])
+        self.assertEqual(invs["scan (صفحة 3).pdf"]["supplier_name"], "شركة الأهرام للتوريدات الهندسية")
+
+    def test_unreviewed_amounts_shown_apart(self):
+        s = self.session("bulk-unrev@x.com")
+        cid = self.create_client(s, "شركة تانية", "999888777")
+        self.upload(s, cid, "01_digital_ok.pdf")  # 'review' (not in this client's name), still in the totals
+        summary = self.app.state.service.summary(cid, self.db.list_invoices(cid)[0]["period"])
+        self.assertEqual((summary["purchases"]["unreviewed_count"], summary["purchases"]["unreviewed_vat"]), (1, 1400.0))
+        page = s.get(f"{self.base}/clients/{cid}", params={"period": self.db.list_invoices(cid)[0]["period"]}).text
+        self.assertIn("لسه ماتراجعتش", page)
 
     def test_invoice_not_in_client_name_is_flagged(self):
         s = self.session("bulk-other@x.com")

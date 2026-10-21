@@ -28,7 +28,7 @@ from . import charts, whatsapp
 from .config import Settings, load_settings
 from .db import Database
 from .exports import build_workbook
-from .services import (MINUTES_PER_INVOICE, DuplicateFileError, InvoiceService, IssueError, UploadError, current_period, filing_deadline,
+from .services import (MINUTES_PER_INVOICE, DuplicateFileError, pdf_page_count, InvoiceService, IssueError, UploadError, current_period, filing_deadline,
                        invoice_question_text, reminder_text, valid_period, wa_link)
 
 log = logging.getLogger(__name__)
@@ -544,7 +544,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             return redirect(f"/clients/{client['id']}#settings")
         fields = {k: form.get(k, "") for k in ("name", "tax_id", "whatsapp_phone", "notes", "eta_client_id")}
         if form.get("eta_client_secret"):  # keep the stored secret unless a new one is typed
-            fields["eta_client_secret"] = form.get("eta_client_secret")
+            fields["eta_client_secret"] = service.box.encrypt(form.get("eta_client_secret").strip())
         if form.get("clear_eta"):
             fields["eta_client_id"] = ""
             fields["eta_client_secret"] = ""
@@ -573,7 +573,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         for upload in files:
             contents.append((upload.filename, await upload.read()))
             await upload.close()
-        if len(contents) == 1:
+        split = bool(form.get("split_pages"))
+        if len(contents) == 1 and not (split and pdf_page_count(*contents[0]) > 1):
             # One invoice: read it now and open it, so its fields are on screen.
             filename, content = contents[0]
             try:
@@ -585,10 +586,16 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                 flash(request, f"\u2068{filename}\u2069: {exc}", "error")
                 return redirect(back)
             flash(request, "اتقرت الفاتورة — راجع البيانات، صلّح لو فيه غلط، واعتمدها.", "success")
+            pages = pdf_page_count(filename, content)
+            if pages > 1:
+                flash(request, f"الملف ده فيه {pages} صفحات واتسجل فاتورة واحدة. لو كل صفحة فاتورة لوحدها، امسحه "
+                               "وارفعه تاني مع اختيار «كل صفحة في الـ PDF فاتورة».", "info")
             return redirect(f"/invoices/{inv_id}")
-        result = await run_in_threadpool(service.queue_files, client, contents, "upload")
+        result = await run_in_threadpool(service.queue_files, client, contents, "upload", split)
+        for msg in result["notes"]:
+            flash(request, msg, "info")
         if result["queued"]:
-            flash(request, f"اترفع {result['queued']} ملف، وكل ملف هيتسجل فاتورة لوحده. بيتقروا دلوقتي في الخلفية — "
+            flash(request, f"اترفع {result['queued']} {'فاتورة' if split else 'ملف'}، وكل {'واحدة' if split else 'ملف'} هيتسجل فاتورة لوحده. بيتقروا دلوقتي في الخلفية — "
                            "تقدر تكمّل شغلك، والفواتير بتظهر هنا أول بأول.", "success")
         for msg in result["skipped"][:10]:
             flash(request, msg, "info")
@@ -934,6 +941,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                     exception_handlers={404: not_found, LookupError: lookup_error})
     app.state.db = db
     app.state.service = service
+    service.encrypt_stored_secrets()
+    service.job_listeners.append(lambda job: whatsapp.reply_when_read(job, db, wa))
     service.start_workers(settings.upload_workers)
     app.state.settings = settings
     return app

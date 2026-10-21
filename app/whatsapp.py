@@ -15,7 +15,7 @@ import requests
 
 from .config import Settings
 from .db import Database
-from .services import InvoiceService, UploadError
+from .services import InvoiceService
 
 log = logging.getLogger(__name__)
 
@@ -122,14 +122,25 @@ def handle_message(message: dict, db: Database, service: InvoiceService, client_
         filename = media.get("filename") or f"whatsapp_{message_id[-8:]}{ext}"
         if not filename.lower().endswith(tuple(MEDIA_EXTS.values())) and ext:
             filename += ext
-        invoice_id = service.add_file(client, filename, content, channel="whatsapp")
-    except UploadError as exc:
-        client_api.send_text(sender, f"⚠️ {exc}")
-        return
+        # Into the same queue as uploads: a client sending 40 photos at once doesn't fire 40 readings
+        # at the same moment (AI rate limits). The reply goes out when the file has been read.
+        result = service.queue_files(client, [(filename, content)], channel="whatsapp",
+                                     reply_to=sender, message_id=message_id)
     except Exception:
         log.exception("WhatsApp media processing failed")
         client_api.send_text(sender, "⚠️ حصلت مشكلة في استلام الملف. جرّب تبعته تاني بعد شوية.")
         return
+    for problem in result["skipped"] + result["failed"]:
+        client_api.send_text(sender, f"⚠️ {problem}")
 
-    db.link_whatsapp_invoice(message_id, invoice_id)
-    client_api.send_text(sender, _reply_for(db.get_invoice(invoice_id)))
+
+def reply_when_read(job: dict, db: Database, client_api: "WhatsAppClient") -> None:
+    """Job listener: tell the client what was read from the photo they sent."""
+    if job.get("channel") != "whatsapp" or not job.get("reply_to"):
+        return
+    if job.get("state") != "done" or not job.get("invoice_id"):
+        client_api.send_text(job["reply_to"], "⚠️ ماقدرناش نقرا الملف ده. ابعته تاني، أو كلّم المحاسب.")
+        return
+    if job.get("message_id"):
+        db.link_whatsapp_invoice(job["message_id"], job["invoice_id"])
+    client_api.send_text(job["reply_to"], _reply_for(db.get_invoice(job["invoice_id"])))
