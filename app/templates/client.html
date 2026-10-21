@@ -95,11 +95,25 @@
     <span class="dz-icon">{{ icon('upload') }}</span>
     <span class="dz-text">
       <strong>اسحب فواتير {{ client.name }} هنا، أو دوس واختار ملفات</strong>
-      <span class="muted small">صور أو PDF، وممكن أكتر من ملف مرة واحدة. بتتقري أول ما تترفع.</span>
+      <span class="muted small" id="dz-hint">صور أو PDF، لحد {{ settings.max_files_per_upload }} ملف في المرة، وكل ملف بيتسجل فاتورة لوحده. الملف اللي اترفع قبل كده مش بيتكرر.</span>
     </span>
   </label>
   <button type="submit" id="dz-submit" hidden>ارفع واقرا</button>
 </form>
+
+{% if progress %}
+<section class="panel batch-progress{% if progress.running %} running{% endif %}" id="batch-progress"
+         data-url="/clients/{{ client.id }}/progress.json" data-done="{{ progress.done }}">
+  <div class="bp-head">
+    <strong id="bp-text">{% if progress.running %}بيقرا الفواتير: {{ progress.done }} من {{ progress.total }}{% else %}اتقرت {{ progress.total }} فاتورة من آخر رفع{% endif %}</strong>
+    <span class="muted small">{% if progress.running %}تقدر تكمّل شغلك أو تقفل الصفحة — القراية شغالة في الخلفية.{% endif %}</span>
+  </div>
+  <div class="bar"><i id="bp-bar" style="width: {{ (100 * progress.done / (progress.total or 1))|round|int }}%"></i></div>
+  {% if progress.failed %}
+  <ul class="issues" style="margin-top:10px">{% for f in progress.failed %}<li class="issue issue-error"><bdi>{{ f.filename }}</bdi>: {{ f.message }}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
+{% endif %}
 
 <section class="panel">
   <div class="toolbar">
@@ -258,7 +272,20 @@
   var form = document.getElementById('upload-form');
   var zone = document.getElementById('dropzone');
   var input = document.getElementById('files');
-  function go() { if (input.files.length) document.getElementById('dz-submit').click(); }
+  var LIMIT = {{ settings.max_files_per_upload }};
+  function go() {
+    if (!input.files.length) return;
+    if (input.files.length > LIMIT) {
+      var hint = document.getElementById('dz-hint');
+      hint.textContent = 'اخترت ' + input.files.length + ' ملف، والحد ' + LIMIT + ' في المرة. اختار أقل وارفع الباقي بعدها.';
+      hint.classList.add('error-text'); input.value = ''; return;
+    }
+    if (input.files.length > 1) {
+      form.dataset.busy = 'بيرفع ' + input.files.length + ' ملف…';
+      form.dataset.busySub = 'الرفع بس بياخد ثواني، والقراية بتكمل في الخلفية.';
+    }
+    document.getElementById('dz-submit').click();
+  }
   input.addEventListener('change', go);
   ['dragenter', 'dragover'].forEach(function (e) {
     zone.addEventListener(e, function (ev) { ev.preventDefault(); zone.classList.add('over'); });
@@ -267,6 +294,19 @@
     zone.addEventListener(e, function (ev) { ev.preventDefault(); zone.classList.remove('over'); });
   });
   zone.addEventListener('drop', function (ev) { input.files = ev.dataTransfer.files; go(); });
+
+  // Background reading: update the bar, reload when new invoices are ready.
+  var bp = document.getElementById('batch-progress');
+  if (bp && bp.classList.contains('running')) {
+    var shown = parseInt(bp.dataset.done, 10) || 0;
+    var timer = setInterval(function () {
+      fetch(bp.dataset.url, { headers: { Accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (p) {
+        document.getElementById('bp-bar').style.width = Math.round(100 * p.done / (p.total || 1)) + '%';
+        document.getElementById('bp-text').textContent = 'بيقرا الفواتير: ' + p.done + ' من ' + p.total;
+        if (!p.running || p.done - shown >= 5) { clearInterval(timer); location.reload(); }
+      }).catch(function () {});
+    }, 3000);
+  }
 
   // bulk approve: only invoices with warnings can be picked (errors must be fixed one by one)
   var all = document.getElementById('pick-all');

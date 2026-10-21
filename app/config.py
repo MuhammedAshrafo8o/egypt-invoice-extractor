@@ -48,6 +48,8 @@ class Settings:
     whatsapp_display_number: str = ""
     # PKCS#11 library of the USB signing token (e.g. C:\\Windows\\System32\\eps2003csp11.dll)
     eta_pkcs11_lib: str = ""
+    max_files_per_upload: int = 50   # files in one upload (each file = one invoice)
+    upload_workers: int = 2          # files read at the same time in the background
     data_dir: Optional[Path] = None
 
     @property
@@ -91,5 +93,7 @@ def load_settings() -> Settings:
         vat_deadline_day=int(os.environ.get("VAT_DEADLINE_DAY", "0") or 0),
         whatsapp_display_number=os.environ.get("WHATSAPP_DISPLAY_NUMBER", ""),
         eta_pkcs11_lib=os.environ.get("ETA_PKCS11_LIB", ""),
+        max_files_per_upload=int(os.environ.get("MAX_FILES_PER_UPLOAD", "50") or 50),
+        upload_workers=int(os.environ.get("UPLOAD_WORKERS", "2") or 2),
         data_dir=data_dir,
     )

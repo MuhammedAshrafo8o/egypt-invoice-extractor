@@ -152,7 +152,15 @@ class AppTestCase(unittest.TestCase):
         files = [("files", (n, (SAMPLES / n).read_bytes(), "application/octet-stream")) for n in names]
         r = s.post(f"{self.base}/clients/{client_id}/upload", data={"csrf": token, "period": PERIOD}, files=files)
         self.assertEqual(r.status_code, 200)
+        self.wait_for_reading(client_id)
         return r
+
+    def wait_for_reading(self, client_id, timeout=60):
+        """Several files are read in the background; wait until they're all done."""
+        deadline = time.time() + timeout
+        while self.db.pending_jobs(client_id) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(self.db.pending_jobs(client_id), 0, "background reading did not finish")
 
     def invoices(self, client_id):
         return {i["original_filename"]: i for i in self.db.list_invoices(client_id)}
@@ -200,7 +208,7 @@ class InvoiceFlowTests(AppTestCase):
         cid = self.create_client(s, "شركة الدلتا للتجارة", "300112455")
         r = self.upload(s, cid, "01_digital_ok.pdf", "02_total_mismatch.pdf", "07_arabic.pdf",
                         "08_arabic_visual_order.pdf", "05_photo.jpg")
-        self.assertIn("اترفعت 5 فاتورة", r.text)
+        self.assertIn("اترفع 5 ملف", r.text)
         inv = self.invoices(cid)
         self.assertEqual(inv["01_digital_ok.pdf"]["status"], "ok")
         self.assertEqual(inv["01_digital_ok.pdf"]["direction"], "purchase")  # client is the buyer
@@ -540,6 +548,58 @@ class ETATests(AppTestCase):
         self.upload(s, cid, "04_eta_einvoice.pdf")
         inv = self.db.list_invoices(cid)[0]
         self.assertEqual((inv["source_type"], inv["status"], inv["vat_amount"]), ("eta_api", "ok", 1015.0))
+
+
+class BulkUploadTests(AppTestCase):
+    def post_files(self, s, cid, files):
+        token = self.csrf(s, f"{self.base}/clients/{cid}")
+        return s.post(f"{self.base}/clients/{cid}/upload", data={"csrf": token, "period": PERIOD}, files=[
+            ("files", (name, data, "application/octet-stream")) for name, data in files])
+
+    def test_many_files_each_one_invoice_and_no_double_upload(self):
+        s = self.session("bulk@x.com")
+        cid = self.create_client(s, "شركة الدلتا", "300112455")
+        names = ["01_digital_ok.pdf", "02_total_mismatch.pdf", "07_arabic.pdf", "09_arabic_photo.jpg",
+                 "05_photo.jpg", "06_scanned.pdf"]
+        files = [(n, (SAMPLES / n).read_bytes()) for n in names]
+        files.append(("copy_of_01.pdf", files[0][1]))                    # same bytes, other name
+        r = self.post_files(s, cid, files)
+        self.assertIn("اترفع 6 ملف", r.text)
+        self.assertIn("متكرر في نفس المجموعة", r.text)
+        self.wait_for_reading(cid)
+        self.assertEqual(sorted(self.invoices(cid)), sorted(names))   # one invoice per file
+        progress = s.get(f"{self.base}/clients/{cid}/progress.json").json()
+        self.assertEqual((progress["total"], progress["done"], progress["running"]), (6, 6, False))
+        # Uploading the same files again adds nothing.
+        r = self.post_files(s, cid, files[:3])
+        self.assertIn("اترفع قبل كده", r.text)
+        self.wait_for_reading(cid)
+        self.assertEqual(len(self.db.list_invoices(cid)), 6)
+        # Same for a single file (read right away).
+        r = self.post_files(s, cid, files[:1])
+        self.assertIn("اترفع قبل كده", r.text)
+        self.assertEqual(len(self.db.list_invoices(cid)), 6)
+
+    def test_upload_limit(self):
+        s = self.session("bulk-limit@x.com")
+        cid = self.create_client(s, "شركة الدلتا", "300112455")
+        settings = self.app.state.settings
+        old, settings.max_files_per_upload = settings.max_files_per_upload, 2
+        try:
+            r = self.post_files(s, cid, [(f"{n}.pdf", (SAMPLES / "01_digital_ok.pdf").read_bytes() + bytes([n]))
+                                         for n in range(3)])
+        finally:
+            settings.max_files_per_upload = old
+        self.assertIn("والحد 2 ملف في المرة", r.text)
+        self.assertEqual(self.db.list_invoices(cid), [])
+
+    def test_invoice_not_in_client_name_is_flagged(self):
+        s = self.session("bulk-other@x.com")
+        cid = self.create_client(s, "شركة تانية", "999888777")
+        self.upload(s, cid, "01_digital_ok.pdf")   # bought by 300112455, not by this client
+        inv = self.db.list_invoices(cid)[0]
+        self.assertEqual(inv["status"], "review")
+        self.assertIn("not_client_invoice", [i["code"] for i in inv["issues"]])
 
 
 class UnitTests(unittest.TestCase):

@@ -128,11 +128,13 @@ def _pages(path: Path, max_pages: int) -> list[Image.Image]:
     if path.suffix.lower() == ".pdf":
         import pypdfium2 as pdfium
 
-        pdf = pdfium.PdfDocument(str(path))
-        try:
-            return [pdf[i].render(scale=300 / 72).to_pil() for i in range(min(len(pdf), max_pages))]
-        finally:
-            pdf.close()
+        from ..pdfium_lock import PDFIUM_LOCK
+        with PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(str(path))
+            try:
+                return [pdf[i].render(scale=300 / 72).to_pil() for i in range(min(len(pdf), max_pages))]
+            finally:
+                pdf.close()
     with Image.open(path) as image:
         image.load()
         return [image.copy()]

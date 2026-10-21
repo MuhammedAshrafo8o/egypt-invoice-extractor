@@ -122,26 +122,52 @@ def _b64(data: bytes) -> str:
     return base64.standard_b64encode(data).decode("ascii")
 
 
-def _content_block(path: Path) -> dict:
+MAX_IMAGE_SIDE = 2400        # px; plenty for reading an invoice
+MAX_IMAGE_BYTES = 1_500_000  # phone photos are often 3-8 MB; providers cap images (Claude: 5 MB)
+
+
+def _payload(path: Path) -> tuple[str, bytes]:
+    """(media type, bytes) to send. Big photos are shrunk and re-encoded: faster, cheaper, within limits."""
     media_type = _media_type(path)
+    data = path.read_bytes()
+    if media_type == "application/pdf":
+        return media_type, data
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(data)) as img:
+            if max(img.size) <= MAX_IMAGE_SIDE and len(data) <= MAX_IMAGE_BYTES:
+                return media_type, data
+            img = ImageOps.exif_transpose(img)  # keep the photo upright
+            img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+            out = io.BytesIO()
+            img.convert("RGB").save(out, "JPEG", quality=88, optimize=True)
+            return "image/jpeg", out.getvalue()
+    except Exception:  # unreadable by Pillow: send as is and let the provider decide
+        return media_type, data
+
+
+def _content_block(path: Path) -> dict:
+    media_type, data = _payload(path)
     block_type = "document" if media_type == "application/pdf" else "image"
-    return {"type": block_type, "source": {"type": "base64", "media_type": media_type,
-                                           "data": _b64(path.read_bytes())}}
+    return {"type": block_type, "source": {"type": "base64", "media_type": media_type, "data": _b64(data)}}
 
 
 def _pdf_pages_as_png(path: Path, max_pages: int = 2) -> list[bytes]:
     import pypdfium2 as pdfium
 
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        out = []
-        for i in range(min(len(pdf), max_pages)):
-            buf = io.BytesIO()
-            pdf[i].render(scale=2).to_pil().save(buf, format="PNG")
-            out.append(buf.getvalue())
-        return out
-    finally:
-        pdf.close()
+    from ..pdfium_lock import PDFIUM_LOCK
+
+    with PDFIUM_LOCK:
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            out = []
+            for i in range(min(len(pdf), max_pages)):
+                buf = io.BytesIO()
+                pdf[i].render(scale=2).to_pil().save(buf, format="PNG")
+                out.append(buf.getvalue())
+            return out
+        finally:
+            pdf.close()
 
 
 def _parse_json(text: str) -> dict:
@@ -212,11 +238,12 @@ def _anthropic(path: Path, model: Optional[str], timeout: int) -> str:
 def _gemini(path: Path, model: Optional[str], timeout: int) -> str:
     base = os.environ.get("GEMINI_BASE_URL", GEMINI_URL).rstrip("/")
     model = model or os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
+    media_type, data = _payload(path)
     payload = _post(
         f"{base}/models/{model}:generateContent",
         {
             "contents": [{"role": "user", "parts": [
-                {"inline_data": {"mime_type": _media_type(path), "data": _b64(path.read_bytes())}},
+                {"inline_data": {"mime_type": media_type, "data": _b64(data)}},
                 {"text": PROMPT},
             ]}],
             "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
@@ -236,7 +263,7 @@ def _openai_compatible(path: Path, model: Optional[str], timeout: int) -> str:
     if path.suffix.lower() == ".pdf":  # most OpenAI-compatible servers only take images
         images = [("image/png", data) for data in _pdf_pages_as_png(path)]
     else:
-        images = [(_media_type(path), path.read_bytes())]
+        images = [_payload(path)]
     content = [{"type": "text", "text": PROMPT}] + [
         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{_b64(data)}"}} for mime, data in images
     ]

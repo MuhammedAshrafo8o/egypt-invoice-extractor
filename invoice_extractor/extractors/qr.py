@@ -33,17 +33,21 @@ def decode_qr_from_image(image: Image.Image) -> list[str]:
 def decode_qr_from_pdf(path: Path, max_pages: int = 3) -> list[str]:
     import pypdfium2 as pdfium
 
+    from ..pdfium_lock import PDFIUM_LOCK
+
     found: list[str] = []
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        for index in range(min(len(pdf), max_pages)):
-            page = pdf[index]
-            image = page.render(scale=2.5).to_pil()
-            found.extend(decode_qr_from_image(image))
-            if found:
-                break
-    finally:
-        pdf.close()
+    for index in range(max_pages):
+        with PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(str(path))
+            try:
+                if index >= len(pdf):
+                    break
+                image = pdf[index].render(scale=2.5).to_pil()
+            finally:
+                pdf.close()
+        found.extend(decode_qr_from_image(image))
+        if found:
+            break
     return found
 
 

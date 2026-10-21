@@ -22,12 +22,13 @@ from starlette.templating import Jinja2Templates
 
 from invoice_extractor.eta_issue import RECEIVER_TYPES, UNIT_TYPES, VAT_KIND_LABELS, check_draft
 from invoice_extractor.extractors import ai_vision, ocr
+from invoice_extractor.pdfium_lock import PDFIUM_LOCK
 
 from . import charts, whatsapp
 from .config import Settings, load_settings
 from .db import Database
 from .exports import build_workbook
-from .services import (MINUTES_PER_INVOICE, InvoiceService, IssueError, UploadError, current_period, filing_deadline,
+from .services import (MINUTES_PER_INVOICE, DuplicateFileError, InvoiceService, IssueError, UploadError, current_period, filing_deadline,
                        invoice_question_text, reminder_text, valid_period, wa_link)
 
 log = logging.getLogger(__name__)
@@ -521,6 +522,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             client["name"], request.state.user["name"], missing)) if missing else None
         return render(request, "client.html", client=client, invoices=invoices, period=period, nav="clients",
                       remind_url=remind_url, q=q, missing=missing, missing_url=missing_url,
+                      progress=db.batch_progress(client["id"]),
                       profile=service.profile(client), can_issue=service.can_issue(client),
                       periods=recent_periods(db.periods(client["id"])), status=status, direction=direction,
                       summary=service.summary(client["id"], period))
@@ -558,35 +560,48 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         client = get_client_or_404(request, request.path_params["client_id"])
         form = await form_with_csrf(request)
         files = [f for f in form.getlist("files") if getattr(f, "filename", "")]
+        viewed_period = valid_period(form.get("period"))
+        back = f"/clients/{client['id']}?period={viewed_period}"
         if not files:
             flash(request, "اختار ملف واحد على الأقل.", "error")
-            return redirect(f"/clients/{client['id']}")
-        viewed_period = valid_period(form.get("period"))
-        new_ids, failed = [], []
+            return redirect(back)
+        limit = settings.max_files_per_upload
+        if len(files) > limit:
+            flash(request, f"اخترت {len(files)} ملف، والحد {limit} ملف في المرة. ارفعهم على كذا دفعة.", "error")
+            return redirect(back)
+        contents = []
         for upload in files:
-            content = await upload.read()
+            contents.append((upload.filename, await upload.read()))
             await upload.close()
+        if len(contents) == 1:
+            # One invoice: read it now and open it, so its fields are on screen.
+            filename, content = contents[0]
             try:
-                new_ids.append(await run_in_threadpool(service.add_file, client, upload.filename, content, "upload"))
+                inv_id = await run_in_threadpool(service.add_file, client, filename, content, "upload")
+            except DuplicateFileError as exc:
+                flash(request, str(exc), "info")
+                return redirect(back)
             except UploadError as exc:
-                failed.append(f"{upload.filename}: {exc}")
-        for msg in failed:
-            flash(request, msg, "error")
-        if len(new_ids) == 1 and not failed:
-            # One invoice: open it straight away so its fields are on screen.
+                flash(request, f"\u2068{filename}\u2069: {exc}", "error")
+                return redirect(back)
             flash(request, "اتقرت الفاتورة — راجع البيانات، صلّح لو فيه غلط، واعتمدها.", "success")
-            return redirect(f"/invoices/{new_ids[0]}")
-        if new_ids:
-            flash(request, f"اترفعت {len(new_ids)} فاتورة واتقرت. دوس على أي فاتورة عشان تشوف بياناتها.", "success")
-            other = {}
-            for inv_id in new_ids:
-                p = db.get_invoice(inv_id)["period"]
-                if p != viewed_period:
-                    other[p] = other.get(p, 0) + 1
-            for p, n in other.items():
-                flash(request, f"{n} فاتورة اتسجلت على شهر {period_label(p)} حسب تاريخها — غيّر الشهر من فوق عشان تشوفها.",
-                      "info")
-        return redirect(f"/clients/{client['id']}?period={viewed_period}")
+            return redirect(f"/invoices/{inv_id}")
+        result = await run_in_threadpool(service.queue_files, client, contents, "upload")
+        if result["queued"]:
+            flash(request, f"اترفع {result['queued']} ملف، وكل ملف هيتسجل فاتورة لوحده. بيتقروا دلوقتي في الخلفية — "
+                           "تقدر تكمّل شغلك، والفواتير بتظهر هنا أول بأول.", "success")
+        for msg in result["skipped"][:10]:
+            flash(request, msg, "info")
+        if len(result["skipped"]) > 10:
+            flash(request, f"و{len(result['skipped']) - 10} ملف تاني متكرر اتخطّوا.", "info")
+        for msg in result["failed"][:10]:
+            flash(request, msg, "error")
+        return redirect(back)
+
+    @login_required
+    async def client_progress(request: Request):
+        client = get_client_or_404(request, request.path_params["client_id"])
+        return JSONResponse(db.batch_progress(client["id"]) or {"running": False, "total": 0, "done": 0})
 
     @login_required
     async def client_approve_bulk(request: Request):
@@ -742,9 +757,10 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         if is_pdf and Path(invoice["stored_path"]).is_file():
             try:
                 import pypdfium2 as pdfium
-                pdf = pdfium.PdfDocument(invoice["stored_path"])
-                page_count = min(len(pdf), 5)
-                pdf.close()
+                with PDFIUM_LOCK:
+                    pdf = pdfium.PdfDocument(invoice["stored_path"])
+                    page_count = min(len(pdf), 5)
+                    pdf.close()
             except Exception:
                 page_count = 1
         first = next((i for i in invoice["issues"] if i.get("level") == "error"), None) or \
@@ -827,14 +843,15 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         if not cached.exists():
             def render_page():
                 import pypdfium2 as pdfium
-                pdf = pdfium.PdfDocument(str(path))
-                try:
-                    if page >= len(pdf):
-                        return False
-                    pdf[page].render(scale=2).to_pil().save(cached)
-                    return True
-                finally:
-                    pdf.close()
+                with PDFIUM_LOCK:
+                    pdf = pdfium.PdfDocument(str(path))
+                    try:
+                        if page >= len(pdf):
+                            return False
+                        pdf[page].render(scale=2).to_pil().save(cached)
+                        return True
+                    finally:
+                        pdf.close()
             if not await run_in_threadpool(render_page):
                 return PlainTextResponse("not found", status_code=404)
         return FileResponse(cached, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
@@ -895,6 +912,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         Route("/clients/{client_id:int}", client_detail),
         Route("/clients/{client_id:int}/edit", client_update, methods=["POST"]),
         Route("/clients/{client_id:int}/upload", client_upload, methods=["POST"]),
+        Route("/clients/{client_id:int}/progress.json", client_progress),
         Route("/clients/{client_id:int}/export.xlsx", client_export),
         Route("/clients/{client_id:int}/approve", client_approve_bulk, methods=["POST"]),
         Route("/clients/{client_id:int}/report", client_report),
@@ -916,5 +934,6 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                     exception_handlers={404: not_found, LookupError: lookup_error})
     app.state.db = db
     app.state.service = service
+    service.start_workers(settings.upload_workers)
     app.state.settings = settings
     return app

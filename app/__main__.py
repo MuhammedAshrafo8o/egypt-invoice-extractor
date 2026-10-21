@@ -22,7 +22,7 @@ def run_server(host: str, port: int, reload: bool) -> None:
 def create_demo() -> None:
     from .config import load_settings
     from .db import Database
-    from .services import InvoiceService
+    from .services import DuplicateFileError, InvoiceService
 
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "samples"))
@@ -48,7 +48,10 @@ def create_demo() -> None:
     files = [p for p in sorted((root / "samples" / "invoices").iterdir()) if p.suffix.lower() in SUPPORTED_EXTS]
     for path in files:
         target = seller if path.name.startswith("01_") else client
-        service.add_file(target, path.name, path.read_bytes())
+        try:
+            service.add_file(target, path.name, path.read_bytes())
+        except DuplicateFileError:
+            pass  # a byte-for-byte copy (e.g. 03): skipped, like it would be for the accountant
         if path.name.startswith("01_"):
             service.add_file(client, path.name, path.read_bytes())  # same invoice as a purchase
     _demo_history(db, uid)

@@ -1,8 +1,10 @@
 """Business logic shared by the dashboard, WhatsApp and ETA sync."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
 import uuid as uuidlib
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -42,8 +44,26 @@ class UploadError(ValueError):
     pass
 
 
+class DuplicateFileError(UploadError):
+    """The exact same file was uploaded before for this client."""
+
+
+def isolate(text: str) -> str:
+    """Keep a Latin file name readable inside an Arabic sentence (Unicode first-strong isolate)."""
+    return f"\u2068{text}\u2069"
+
+
+def file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
 def current_period() -> str:
     return date.today().strftime("%Y-%m")
+
+
+def _months_between(earlier: str, later: str) -> int:
+    (y1, m1), (y2, m2) = map(int, earlier.split("-")), map(int, later.split("-"))
+    return (y2 - y1) * 12 + (m2 - m1)
 
 
 def period_for(invoice_date: Optional[str]) -> str:
@@ -144,6 +164,10 @@ class InvoiceService:
         self.db = db
         self.settings = settings
         self.eta_client_factory = eta_client_factory
+        self._wake = threading.Event()   # set when new files are queued
+        self._store_lock = threading.RLock()
+        self._turns = threading.Condition()  # files of one batch are saved in upload order
+        self._workers = []
 
     # ------------------------------------------------------------ helpers
     def eta_client(self, client) -> Optional[ETAClient]:
@@ -178,6 +202,30 @@ class InvoiceService:
             inv.add_issue("error", "duplicate", f"Duplicate of invoice #{duplicate['id']}.",
                           f"الفاتورة دي متسجلة قبل كده (رقم {duplicate['id']} في النظام).")
             set_status(inv)
+        else:
+            maybe = self.db.find_possible_duplicate(client["id"], record, exclude_id=exclude_id)
+            if maybe:
+                inv.add_issue("warning", "possible_duplicate",
+                              f"Same supplier, date and total as invoice #{maybe['id']}.",
+                              f"نفس المورد ونفس اليوم ونفس الإجمالي زي فاتورة رقم {maybe['id']} في النظام — "
+                              "اتأكد إنها مش نفس الفاتورة متصورة مرتين.")
+                set_status(inv)
+        own = client["tax_id"]
+        chosen = direction if direction in ("purchase", "sale") else self.detect_direction(client, inv)
+        if own and chosen == "purchase" and inv.buyer_tax_id and inv.buyer_tax_id != own \
+                and inv.supplier_tax_id != own:
+            inv.add_issue("warning", "not_client_invoice",
+                          f"Buyer tax ID {inv.buyer_tax_id} is not this client's ({own}).",
+                          f"المشتري في الفاتورة رقمه الضريبي {inv.buyer_tax_id}، مش رقم {client['name']} ({own}) — "
+                          "الفاتورة لازم تبقى باسم العميل عشان ضريبتها تتخصم له.")
+            set_status(inv)
+        if not period:
+            months_back = _months_between(period_for(inv.invoice_date), current_period())
+            if months_back >= 2:
+                inv.add_issue("warning", "late_period", f"Dated {months_back} months ago; that return may be filed.",
+                              f"تاريخ الفاتورة من {months_back} شهور، فاتسجلت على شهرها وإقراره غالبًا اتقدم. "
+                              "لو هتدخلها في إقرار الشهر ده، غيّر الشهر من التعديل.")
+                set_status(inv)
         record.update(
             status=inv.status,
             direction=direction if direction in ("purchase", "sale") else self.detect_direction(client, inv),
@@ -238,23 +286,114 @@ class InvoiceService:
         path.write_bytes(content)
         return path
 
-    def add_file(self, client, filename: str, content: bytes, channel: str = "upload") -> int:
-        path = self.store_file(client["id"], filename, content)
-        return self.process_stored(client, path, filename, channel)
+    def check_not_seen(self, client, content: bytes) -> str:
+        digest = file_hash(content)
+        seen = self.db.file_seen(client["id"], digest)
+        if seen:
+            where = f" (فاتورة رقم {seen['invoice_id']} في النظام)" if seen["invoice_id"] else " وبيتقري دلوقتي"
+            raise DuplicateFileError(f"الملف ده نفسه اترفع قبل كده باسم «{isolate(seen['filename'])}»{where}، فمش هيتسجل تاني.")
+        return digest
 
-    def process_stored(self, client, path: Path, original_filename: str, channel: str = "upload",
-                       existing_id: Optional[int] = None) -> int:
+    def add_file(self, client, filename: str, content: bytes, channel: str = "upload") -> int:
+        digest = self.check_not_seen(client, content)
+        path = self.store_file(client["id"], filename, content)
+        return self.process_stored(client, path, filename, channel, file_hash=digest)
+
+    # ------------------------------------------------- background reading
+    def queue_files(self, client, files: list[tuple[str, bytes]], channel: str = "upload") -> dict:
+        """Store files now and read them in the background. Same file twice (in this batch or before) is skipped."""
+        batch = uuidlib.uuid4().hex[:12]
+        queued, skipped, failed, seen = [], [], [], set()
+        for filename, content in files:
+            try:
+                digest = file_hash(content)
+                if digest in seen:
+                    raise DuplicateFileError(f"الملف «{isolate(filename)}» متكرر في نفس المجموعة، فاترفع مرة واحدة بس.")
+                self.check_not_seen(client, content)
+                path = self.store_file(client["id"], filename, content)
+            except DuplicateFileError as exc:
+                skipped.append(str(exc))
+                continue
+            except UploadError as exc:
+                failed.append(f"{isolate(filename)}: {exc}")
+                continue
+            seen.add(digest)
+            queued.append({"filename": filename, "stored_path": str(path), "file_hash": digest})
+        if queued:
+            self.db.add_jobs(client["id"], batch, queued, channel)
+            self._wake.set()
+        return {"queued": len(queued), "skipped": skipped, "failed": failed, "batch": batch}
+
+    def start_workers(self, count: int = 2) -> None:
+        if getattr(self, "_workers", None):
+            return
+        self.db.requeue_interrupted_jobs()
+        self._stop = threading.Event()
+        self._workers = [threading.Thread(target=self._work_loop, name=f"reader-{n}", daemon=True)
+                         for n in range(max(1, count))]
+        for t in self._workers:
+            t.start()
+
+    def stop_workers(self) -> None:
+        if getattr(self, "_workers", None):
+            self._stop.set()
+            self._wake.set()
+
+    def _work_loop(self) -> None:
+        while not self._stop.is_set():
+            job = self.db.claim_job()
+            if not job:
+                self._wake.wait(1.0)
+                self._wake.clear()
+                continue
+            self.run_job(job)
+
+    def run_job(self, job: dict) -> None:
+        client = self.db.get_client(job["client_id"])
+        if not client:
+            self.db.finish_job(job["id"], "failed", message="العميل اتمسح.")
+            return
+        try:
+            inv = self.read_stored(client, Path(job["stored_path"]), job["filename"])
+            # Read in parallel, but save in upload order: the first copy of an invoice stays the
+            # original and later copies are the ones marked as duplicates.
+            with self._turns:
+                self._turns.wait_for(lambda: not self.db.earlier_jobs_open(job), timeout=600)
+            invoice_id = self.process_stored(client, Path(job["stored_path"]), job["filename"], job["channel"],
+                                             file_hash=job["file_hash"], inv=inv)
+            self.db.finish_job(job["id"], "done", invoice_id)
+        except Exception as exc:  # one bad file must not stop the batch
+            log.exception("Reading %s failed", job["filename"])
+            self.db.finish_job(job["id"], "failed", message=str(exc)[:300])
+        finally:
+            with self._turns:
+                self._turns.notify_all()
+
+    def read_stored(self, client, path: Path, original_filename: str) -> Invoice:
+        """The slow part (AI / OCR / ETA lookups). Safe to run for several files at once."""
         eta = None if self.settings.eta_demo else self.eta_client(client)
         inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr,
                            eta_fetcher=eta.fetch_fields if eta else None)
         inv.source_file = original_filename
+        return inv
+
+    def process_stored(self, client, path: Path, original_filename: str, channel: str = "upload",
+                       existing_id: Optional[int] = None, file_hash: Optional[str] = None,
+                       inv: Optional[Invoice] = None) -> int:
+        inv = inv or self.read_stored(client, path, original_filename)
+        with self._store_lock:  # duplicate checks + insert must not interleave between workers
+            return self._store(client, inv, path, original_filename, channel, existing_id, file_hash)
+
+    def _store(self, client, inv: Invoice, path: Path, original_filename: str, channel: str,
+               existing_id: Optional[int], file_hash: Optional[str]) -> int:
         record = self._finalize(client, inv, exclude_id=existing_id)
         record["raw_text"] = inv.raw_text
         if existing_id:
             record["approved"] = 0
             self.db.update_invoice(existing_id, record)
             return existing_id
-        record.update(channel=channel, original_filename=original_filename, stored_path=str(path))
+        record.update(channel=channel, original_filename=original_filename, stored_path=str(path),
+                      file_hash=file_hash)
         if record["direction"] == "sale" and inv.line_items:
             # Item rows were read: keep them so issuing the e-invoice starts pre-filled.
             record["eta_draft"] = json.dumps(self.draft_from_extracted(client, inv).to_dict(), ensure_ascii=False)

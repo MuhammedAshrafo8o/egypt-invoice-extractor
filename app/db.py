@@ -9,7 +9,7 @@ import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -83,6 +83,23 @@ CREATE TABLE IF NOT EXISTS parties (
     PRIMARY KEY (accountant_id, tax_id)
 );
 
+-- Files waiting to be read (big uploads are read in the background, a few at a time).
+CREATE TABLE IF NOT EXISTS upload_jobs (
+    id            INTEGER PRIMARY KEY,
+    client_id     INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    batch         TEXT NOT NULL,
+    filename      TEXT NOT NULL,
+    stored_path   TEXT NOT NULL,
+    file_hash     TEXT,
+    channel       TEXT NOT NULL DEFAULT 'upload',
+    state         TEXT NOT NULL DEFAULT 'queued',   -- queued | working | done | failed
+    invoice_id    INTEGER,
+    message       TEXT,
+    created_at    TEXT NOT NULL,
+    finished_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_state ON upload_jobs(state, id);
+
 CREATE TABLE IF NOT EXISTS whatsapp_messages (
     message_id  TEXT PRIMARY KEY,
     phone       TEXT NOT NULL,
@@ -112,12 +129,13 @@ class Database:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
             self._migrate(conn)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_invoices_hash ON invoices(client_id, file_hash)")
 
     # Columns added after the first release; older databases get them here.
     MIGRATIONS = {
         "clients": {"eta_profile": "TEXT"},
         "invoices": {"eta_draft": "TEXT", "eta_state": "TEXT", "eta_message": "TEXT",
-                     "eta_long_id": "TEXT", "eta_check": "TEXT"},
+                     "eta_long_id": "TEXT", "eta_check": "TEXT", "file_hash": "TEXT"},
         "parties": {"details_json": "TEXT"},
     }
 
@@ -255,7 +273,8 @@ class Database:
     def insert_invoice(self, client_id: int, data: dict) -> int:
         cols = ["client_id", "direction", "status", "approved", "source_type", "channel",
                 "original_filename", "stored_path", "period", *INVOICE_FIELDS,
-                "eta_uuid", "eta_url", "eta_draft", "eta_check", "issues_json", "raw_text", "created_at", "updated_at"]
+                "eta_uuid", "eta_url", "eta_draft", "eta_check", "file_hash", "issues_json", "raw_text", "created_at",
+                "updated_at"]
         row = {
             "client_id": client_id, "approved": 0, "channel": "upload", "direction": "purchase",
             "issues_json": "[]", "created_at": now(), "updated_at": now(), **data,
@@ -564,6 +583,95 @@ class Database:
         with self.connect() as conn:
             row = conn.execute(sql + " ORDER BY id LIMIT 1", params).fetchone()
         return _invoice_dict(row) if row else None
+
+    def find_possible_duplicate(self, client_id: int, invoice: dict, exclude_id: Optional[int] = None) -> Optional[dict]:
+        """Same supplier, same day, same total (catches copies whose number wasn't read or was written differently)."""
+        if invoice.get("total") is None or not invoice.get("invoice_date"):
+            return None
+        if invoice.get("supplier_tax_id"):
+            who, arg = "supplier_tax_id = ?", invoice["supplier_tax_id"]
+        elif invoice.get("supplier_name"):
+            who, arg = "norm(supplier_name) = ?", _norm(invoice["supplier_name"])
+        else:
+            return None
+        sql = (f"SELECT * FROM invoices WHERE client_id = ? AND {who} AND invoice_date = ? "
+               "AND ABS(COALESCE(total, 0) - ?) < 0.01")
+        params = [client_id, arg, invoice["invoice_date"], invoice["total"]]
+        if exclude_id:
+            sql += " AND id < ?"
+            params.append(exclude_id)
+        with self.connect() as conn:
+            row = conn.execute(sql + " ORDER BY id LIMIT 1", params).fetchone()
+        return _invoice_dict(row) if row else None
+
+    # ------------------------------------------------------------ upload jobs
+    def file_seen(self, client_id: int, file_hash: str) -> Optional[dict]:
+        """The same file (byte for byte) already stored or waiting for this client."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT id, original_filename FROM invoices WHERE client_id = ? AND file_hash = ? "
+                               "ORDER BY id LIMIT 1", (client_id, file_hash)).fetchone()
+            if row:
+                return {"invoice_id": row["id"], "filename": row["original_filename"]}
+            row = conn.execute("SELECT filename FROM upload_jobs WHERE client_id = ? AND file_hash = ? "
+                               "AND state IN ('queued', 'working') LIMIT 1", (client_id, file_hash)).fetchone()
+        return {"invoice_id": None, "filename": row["filename"]} if row else None
+
+    def add_jobs(self, client_id: int, batch: str, files: list[dict], channel: str = "upload") -> None:
+        with self.connect() as conn:
+            conn.executemany(
+                "INSERT INTO upload_jobs(client_id, batch, filename, stored_path, file_hash, channel, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                [(client_id, batch, f["filename"], f["stored_path"], f["file_hash"], channel, now()) for f in files])
+
+    def claim_job(self) -> Optional[dict]:
+        """Take the oldest queued job (atomic, so several workers never read the same file)."""
+        with self._lock, self.connect() as conn:
+            row = conn.execute("SELECT * FROM upload_jobs WHERE state = 'queued' ORDER BY id LIMIT 1").fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE upload_jobs SET state = 'working' WHERE id = ?", (row["id"],))
+            return dict(row)
+
+    def finish_job(self, job_id: int, state: str, invoice_id: Optional[int] = None, message: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE upload_jobs SET state = ?, invoice_id = ?, message = ?, finished_at = ? WHERE id = ?",
+                         (state, invoice_id, message or None, now(), job_id))
+
+    def earlier_jobs_open(self, job: dict) -> bool:
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM upload_jobs WHERE client_id = ? AND id < ? "
+                                "AND state IN ('queued', 'working') LIMIT 1",
+                                (job["client_id"], job["id"])).fetchone() is not None
+
+    def requeue_interrupted_jobs(self) -> int:
+        with self.connect() as conn:
+            return conn.execute("UPDATE upload_jobs SET state = 'queued' WHERE state = 'working'").rowcount
+
+    def batch_progress(self, client_id: int) -> Optional[dict]:
+        """Progress of this client's latest upload batch, while it runs and for 10 minutes after."""
+        with self.connect() as conn:
+            last = conn.execute("SELECT batch FROM upload_jobs WHERE client_id = ? ORDER BY id DESC LIMIT 1",
+                                (client_id,)).fetchone()
+            if not last:
+                return None
+            rows = conn.execute("SELECT state, filename, message, finished_at FROM upload_jobs "
+                                "WHERE client_id = ? AND batch = ?", (client_id, last["batch"])).fetchall()
+        total = len(rows)
+        done = sum(1 for r in rows if r["state"] in ("done", "failed"))
+        running = done < total
+        finished = [r["finished_at"] for r in rows if r["finished_at"]]
+        if not running and finished and max(finished) < (datetime.now() - timedelta(minutes=10)).isoformat():
+            return None
+        return {"batch": last["batch"], "total": total, "done": done, "running": running,
+                "failed": [{"filename": r["filename"], "message": r["message"]} for r in rows if r["state"] == "failed"]}
+
+    def pending_jobs(self, client_id: Optional[int] = None) -> int:
+        sql, args = "SELECT COUNT(*) FROM upload_jobs WHERE state IN ('queued', 'working')", []
+        if client_id:
+            sql += " AND client_id = ?"
+            args.append(client_id)
+        with self.connect() as conn:
+            return conn.execute(sql, args).fetchone()[0]
 
     def uuid_exists(self, client_id: int, uuid: str) -> bool:
         with self.connect() as conn:
