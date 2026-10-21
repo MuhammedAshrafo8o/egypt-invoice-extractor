@@ -38,6 +38,10 @@ class Invoice:
     raw_text: Optional[str] = None
     issues: list[Issue] = field(default_factory=list)
     status: str = "pending"  # ok | review | error
+    # Item rows read by the AI reader (used to pre-fill a sales e-invoice); not stored as fields.
+    line_items: list = field(default_factory=list)
+    buyer_address: Optional[str] = None
+    prices_include_vat: bool = False
 
     def add_issue(self, level: str, code: str, message: str, message_ar: str = "") -> None:
         self.issues.append(Issue(level, code, message, message_ar or message))

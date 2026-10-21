@@ -100,6 +100,13 @@ def _read_with_ai(inv: Invoice, path: Path) -> bool:
         if tmp and tmp.exists():
             tmp.unlink()
     confidence = data.pop("confidence", None)
+    lines = data.pop("lines", None)
+    if isinstance(lines, list) and not inv.line_items:
+        inv.line_items = [l for l in lines if isinstance(l, dict)]
+    address = data.pop("buyer_address", None)
+    if isinstance(address, str) and address.strip():
+        inv.buyer_address = address.strip()
+    inv.prices_include_vat = bool(data.pop("prices_include_vat", False))
     filled = inv.merge_missing(_clean(data))
     if inv.source_type == "unknown":
         inv.source_type = "ai_vision"

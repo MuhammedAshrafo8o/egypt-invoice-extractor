@@ -270,7 +270,7 @@ class Database:
     def update_invoice(self, invoice_id: int, data: dict) -> None:
         allowed = {"direction", "status", "approved", "source_type", "period", "eta_uuid", "eta_url",
                    "issues_json", "raw_text", "eta_draft", "eta_state", "eta_message", "eta_long_id", "eta_check",
-                   "channel", *INVOICE_FIELDS}
+                   "channel", "stored_path", "original_filename", *INVOICE_FIELDS}
         values = {k: v for k, v in data.items() if k in allowed}
         values["updated_at"] = now()
         sets = ", ".join(f"{k} = ?" for k in values)

@@ -675,6 +675,18 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             form = await form_with_csrf(request)
             action = form.get("action", "save")
             try:
+                if action == "upload":
+                    upload = form.get("file")
+                    if not getattr(upload, "filename", ""):
+                        flash(request, "اختار صورة الفاتورة أو ملف PDF.", "error")
+                        return redirect(f"/invoices/{invoice['id']}/issue")
+                    content = await upload.read()
+                    notes = await run_in_threadpool(service.fill_sale_from_upload, client, invoice,
+                                                    upload.filename, content)
+                    flash(request, "اتقرت الفاتورة واتملت البيانات — راجعها قبل ما تبعت.", "success")
+                    for note in notes:
+                        flash(request, note, "info")
+                    return redirect(f"/invoices/{invoice['id']}/issue")
                 if action == "refresh":
                     invoice = await run_in_threadpool(service.refresh_issue, client, invoice)
                     flash(request, ETA_STATE_LABELS.get(invoice.get("eta_state") or "", "اتحدثت الحالة."),

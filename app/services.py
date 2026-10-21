@@ -14,7 +14,7 @@ from invoice_extractor.eta_client import (ETAClient, ETAError, error_messages, m
                                           validation_messages)
 from invoice_extractor.eta_demo import DemoETAClient
 from invoice_extractor.eta_issue import Draft, Line, Party, build_document, check_draft, document_hash_input, \
-    public_url
+    lines_from_extracted, public_url
 from invoice_extractor.eta_signer import (PfxSigner, Pkcs11Signer, SigningError, check_certificate,
                                           make_test_certificate, sign_document_bytes)
 from invoice_extractor.models import Invoice
@@ -255,6 +255,9 @@ class InvoiceService:
             self.db.update_invoice(existing_id, record)
             return existing_id
         record.update(channel=channel, original_filename=original_filename, stored_path=str(path))
+        if record["direction"] == "sale" and inv.line_items:
+            # Item rows were read: keep them so issuing the e-invoice starts pre-filled.
+            record["eta_draft"] = json.dumps(self.draft_from_extracted(client, inv).to_dict(), ensure_ascii=False)
         return self.db.insert_invoice(client["id"], record)
 
     def reprocess(self, client, invoice: dict) -> int:
@@ -484,6 +487,55 @@ class InvoiceService:
                 line.vat_kind, line.vat_rate = "other", rate
         return Draft(receiver=receiver, lines=[line], internal_id=invoice.get("invoice_number") or "",
                      issue_date=invoice.get("invoice_date") or date.today().isoformat())
+
+    def draft_from_extracted(self, client, inv: Invoice, base: Optional[Draft] = None) -> Draft:
+        """A draft e-invoice from what was read off a paper/photo sales invoice."""
+        base = base or Draft()
+        tax_id = inv.buyer_tax_id or ""
+        rtype = "B" if len(tax_id) == 9 else "P"
+        receiver = Party(type=rtype, id=tax_id, name=inv.buyer_name or "")
+        known = self.db.party_details(client["accountant_id"], tax_id) if rtype == "B" and tax_id else {}
+        if known:
+            receiver = Party.from_dict({**known, "type": "B", "id": tax_id, "name": receiver.name or known.get("name")})
+        elif inv.buyer_address and rtype == "B":
+            receiver.street = inv.buyer_address  # the accountant splits it into governorate/city if needed
+        lines = lines_from_extracted(inv.line_items, inv.prices_include_vat, inv.vat_rate, inv.subtotal, inv.total)
+        issue_date = inv.invoice_date if inv.invoice_date and inv.invoice_date <= date.today().isoformat() \
+            else (base.issue_date or date.today().isoformat())
+        return Draft(receiver=receiver, lines=lines, internal_id=inv.invoice_number or base.internal_id,
+                     issue_date=issue_date)
+
+    def fill_sale_from_upload(self, client, invoice: dict, filename: str, content: bytes) -> list[str]:
+        """Read a paper/photo sales invoice into this (not yet issued) e-invoice. Returns Arabic notes."""
+        if invoice.get("eta_state") in ("submitted", "valid"):
+            raise IssueError(["الفاتورة اتبعتت للمنظومة خلاص ومينفعش تتغير."])
+        try:
+            path = self.store_file(client["id"], filename, content)
+        except UploadError as exc:
+            raise IssueError([str(exc)])
+        inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr)
+        current = self.draft_for(client, invoice)
+        draft = self.draft_from_extracted(client, inv, base=current)
+        self.db.update_invoice(invoice["id"], {"stored_path": str(path), "original_filename": filename,
+                                               "raw_text": inv.raw_text, "source_type": inv.source_type})
+        self.save_draft(client, self.db.get_invoice(invoice["id"]), draft)
+        notes = []
+        read_issue = next((i for i in inv.issues if i.code in ("ai_failed", "ai_unavailable", "ai_disabled",
+                                                             "ocr_failed")), None)
+        if read_issue:
+            notes.append(read_issue.message_ar)
+        if not inv.line_items:
+            notes.append("الأصناف ماتقرتش من الصورة، فحطيت سطر واحد بالمبلغ قبل الضريبة — اكتب الأصناف بالتفصيل.")
+        totals = draft.totals()
+        if inv.total and abs(totals["total"] - inv.total) > 1:
+            notes.append(f"مجموع الأصناف ({totals['total']:,.2f}) مختلف عن إجمالي الفاتورة الورق "
+                         f"({inv.total:,.2f}) — راجع الكميات والأسعار.")
+        if client["tax_id"] and inv.buyer_tax_id == client["tax_id"]:
+            notes.append(f"المشتري في الفاتورة دي هو {client['name']} نفسه — غالبًا دي فاتورة مشتريات مش مبيعات. "
+                         "فاتورة المشتريات بيصدرها المورد، ارفعها في صفحة العميل بدل هنا.")
+        if inv.buyer_tax_id and len(inv.buyer_tax_id) not in (9, 14):
+            notes.append(f"الرقم الضريبي للمشتري اتقرا {inv.buyer_tax_id} — مش ٩ أرقام، راجعه.")
+        return notes
 
     @staticmethod
     def draft_from_form(form) -> Draft:

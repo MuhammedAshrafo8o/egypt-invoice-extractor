@@ -520,3 +520,4 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
   .eta-missing-list li > span.muted { grid-column: 1 / -1; }
 }
 .main, .issue-layout, .issue-main .panel { min-width: 0; }
+.fill-zone { margin-bottom: 18px; }

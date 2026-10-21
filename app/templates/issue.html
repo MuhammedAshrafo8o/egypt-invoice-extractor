@@ -51,6 +51,23 @@
 </div>
 {% endif %}
 
+{% if not locked %}
+<form method="post" enctype="multipart/form-data" id="fill-form" data-busy="بيقرا الفاتورة ويملى البيانات…"
+      data-busy-sub="بيطلع المشتري والأصناف والأسعار من الصورة. بياخد ثواني.">
+  <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="upload">
+  <input type="file" name="file" id="fill-file" accept=".pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff" hidden>
+  <label class="dropzone panel fill-zone" id="fill-zone" for="fill-file">
+    <span class="dz-icon">{{ icon('upload') }}</span>
+    <span class="dz-text">
+      {% if has_file %}<strong>ارفع صورة تانية لو عايز تقراها من الأول</strong>
+      {% else %}<strong>عندك الفاتورة ورق أو صورة؟ ارفعها وهتتملى لوحدها</strong>{% endif %}
+      <span class="muted small">صورة موبايل أو PDF، مطبوعة أو بخط اليد. المشتري والأصناف والأسعار بيتملوا، وإنت بتراجع بس.</span>
+    </span>
+  </label>
+  <button type="submit" id="fill-submit" hidden>اقرا</button>
+</form>
+{% endif %}
+
 <form method="post" id="issue-form" class="issue-layout" autocomplete="off">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <div class="issue-main{% if locked %} locked{% endif %}"><fieldset class="plain" {% if locked %}disabled{% endif %}>
@@ -225,6 +242,21 @@
     }
   });
   receiverType(); recalc();
+
+  // Paper/photo invoice: reading starts as soon as a file is picked or dropped.
+  var zone = document.getElementById('fill-zone');
+  if (zone) {
+    var file = document.getElementById('fill-file');
+    var go = function () { if (file.files.length) document.getElementById('fill-submit').click(); };
+    file.addEventListener('change', go);
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('over'); });
+    });
+    zone.addEventListener('drop', function (e) { file.files = e.dataTransfer.files; go(); });
+  }
 })();
 </script>
 {% endblock %}

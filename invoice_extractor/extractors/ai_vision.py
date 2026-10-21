@@ -54,6 +54,15 @@ no prose, no markdown fences.
   "vat_rate": number|null,           // as a fraction, 14% -> 0.14
   "vat_amount": number|null,
   "total": number|null,              // grand total including VAT
+  "buyer_address": string|null,      // buyer's address as written, if any
+  "prices_include_vat": boolean,     // true if the line prices already include VAT
+  "lines": [                         // one entry per item row, in order; [] if there is no item table
+    {"description": string, "quantity": number|null, "unit": string|null,
+     "unit_price": number|null,      // price of one unit as written
+     "discount": number|null,        // discount amount on this row, if any
+     "amount": number|null,          // row total as written
+     "vat_rate": number|null}        // fraction, if the row shows its own rate
+  ],
   "confidence": number               // 0..1, your confidence in the extraction overall
 }
 

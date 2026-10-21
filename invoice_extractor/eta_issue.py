@@ -348,3 +348,60 @@ def public_url(env: str, uuid: str, long_id: str) -> Optional[str]:
         return None
     host = {"prod": "invoicing.eta.gov.eg", "preprod": "preprod.invoicing.eta.gov.eg"}.get(env)
     return f"https://{host}/print/documents/{uuid}/share/{long_id}" if host else None
+
+
+def _num(value) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", "").translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")))
+    except ValueError:
+        return None
+
+
+def _rate_percent(value) -> Optional[float]:
+    rate = _num(value)
+    if rate is None:
+        return None
+    return rate * 100 if rate <= 1 else rate
+
+
+def lines_from_extracted(items: list, prices_include_vat: bool = False, invoice_vat_rate=None,
+                         subtotal=None, total=None) -> list[Line]:
+    """Item rows read off a paper/photo invoice -> editable e-invoice lines.
+
+    Without item rows, one line carries the invoice's amount before VAT so the totals still match."""
+    default_rate = _rate_percent(invoice_vat_rate)
+    lines = []
+    for item in items or []:
+        qty = _num(item.get("quantity"))
+        price = _num(item.get("unit_price"))
+        amount = _num(item.get("amount"))
+        if not qty:
+            qty = round(amount / price, 5) if amount and price else 1.0
+        if price is None and amount is not None:
+            price = amount / qty
+        if price is None:
+            continue
+        rate = _rate_percent(item.get("vat_rate"))
+        rate = rate if rate is not None else (default_rate if default_rate is not None else 14.0)
+        if prices_include_vat and rate:
+            price = price / (1 + rate / 100)
+        line = Line(description=clean_text(item.get("description")) or "صنف", quantity=qty,
+                    unit_price=r5(price), discount=r5(_num(item.get("discount")) or 0))
+        if abs(rate - 14) < 0.01:
+            line.vat_kind = "standard"
+        elif rate == 0:
+            line.vat_kind = "exempt"
+        else:
+            line.vat_kind, line.vat_rate = "other", round(rate, 2)
+        lines.append(line)
+    if not lines:
+        base = _num(subtotal)
+        if base is None and _num(total) is not None:
+            base = _num(total) / (1 + (default_rate if default_rate is not None else 14.0) / 100)
+        line = Line(description="", quantity=1, unit_price=r5(base or 0))
+        if default_rate is not None and abs(default_rate - 14) >= 0.01:
+            line.vat_kind, line.vat_rate = ("exempt", None) if default_rate == 0 else ("other", round(default_rate, 2))
+        lines.append(line)
+    return lines

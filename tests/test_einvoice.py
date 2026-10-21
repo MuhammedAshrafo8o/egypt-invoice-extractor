@@ -19,8 +19,11 @@ from test_app import PERIOD, AppTestCase
 
 from app.db import Database
 from invoice_extractor.eta_demo import DemoETAClient
+from unittest import mock
+
 from invoice_extractor.eta_issue import (Draft, Line, Party, build_document, check_draft, document_hash_input,
-                                         issued_at, serialize)
+                                         issued_at, lines_from_extracted, serialize)
+from invoice_extractor.extractors import ai_vision
 from invoice_extractor.eta_signer import PfxSigner, make_test_certificate, sign_document_bytes
 
 ISSUER = Party(id="300112455", name="شركة الدلتا", governate="الإسكندرية", region_city="سموحة",
@@ -81,6 +84,28 @@ class DocumentTests(unittest.TestCase):
         now = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
         self.assertEqual(issued_at("2026-10-19", now), "2026-10-19T11:55:00Z")
         self.assertEqual(issued_at("2026-10-01", now), "2026-10-01T08:00:00Z")
+
+
+class ExtractedLinesTests(unittest.TestCase):
+    def test_item_rows_become_lines(self):
+        lines = lines_from_extracted([
+            {"description": "مواسير", "quantity": "20", "unit_price": "350", "discount": 200},
+            {"description": "تركيب", "amount": 1500},                       # only a row total
+            {"description": "كتب", "quantity": 2, "unit_price": 100, "vat_rate": 0},
+            {"description": "عدة", "quantity": 1, "unit_price": 105, "vat_rate": 0.05},
+        ])
+        self.assertEqual([(l.quantity, l.unit_price, l.discount, l.vat_kind) for l in lines],
+                         [(20, 350, 200, "standard"), (1, 1500, 0, "standard"), (2, 100, 0, "exempt"),
+                          (1, 105, 0, "other")])
+        self.assertEqual(lines[3].vat_rate, 5)
+
+    def test_prices_including_vat_and_no_rows(self):
+        [line] = lines_from_extracted([{"description": "x", "quantity": 1, "unit_price": 1140}], prices_include_vat=True)
+        self.assertEqual(line.unit_price, 1000)
+        [fallback] = lines_from_extracted([], subtotal=4800, invoice_vat_rate=0.14)
+        self.assertEqual((fallback.quantity, fallback.unit_price, fallback.vat_kind), (1, 4800, "standard"))
+        [from_total] = lines_from_extracted([], total=1140)
+        self.assertEqual(from_total.unit_price, 1000)
 
 
 class SignatureTests(unittest.TestCase):
@@ -243,6 +268,48 @@ class IssuingFlowTests(AppTestCase):
         purchase = self.db.list_invoices(cid)[0]
         r = s.get(f"{self.base}/invoices/{purchase['id']}/issue")
         self.assertIn("بيصدرها المورد", r.text)
+
+    def upload_to_issue(self, s, inv_id, name):
+        from test_app import SAMPLES
+        token = self.csrf(s, f"{self.base}/invoices/{inv_id}/issue")
+        return s.post(f"{self.base}/invoices/{inv_id}/issue", data={"csrf": token, "action": "upload"},
+                      files={"file": (name, (SAMPLES / name).read_bytes(), "application/octet-stream")})
+
+    def test_fill_from_photo_with_ai(self):
+        s, cid = self.setup_client("fill-ai@x.com")
+        inv_id = self.new_sale(s, cid)
+        read = {"supplier_name": "شركة الدلتا", "supplier_tax_id": "300112455", "buyer_name": "شركة الأهرام",
+                "buyer_tax_id": "488-201-736", "invoice_number": "S-77", "invoice_date": "2026-10-05",
+                "subtotal": 8500, "vat_amount": 1190, "total": 9690, "confidence": 0.9,
+                "lines": [{"description": "توريد مواسير", "quantity": 20, "unit_price": 350},
+                          {"description": "تركيب", "quantity": 1, "unit_price": 1500}]}
+        self.service.settings.use_ai = True
+        try:
+            with mock.patch.object(ai_vision, "is_available", return_value=True), \
+                    mock.patch.object(ai_vision, "extract_with_ai", return_value=dict(read)):
+                r = self.upload_to_issue(s, inv_id, "05_photo.jpg")
+        finally:
+            self.service.settings.use_ai = False
+        self.assertIn("اتملت البيانات", r.text)
+        inv = self.db.get_invoice(inv_id)
+        draft = self.service.draft_for(self.db.get_client(cid), inv)
+        self.assertEqual((draft.receiver.type, draft.receiver.id, draft.receiver.name), ("B", "488201736", "شركة الأهرام"))
+        self.assertEqual([(l.description, l.quantity, l.unit_price) for l in draft.lines],
+                         [("توريد مواسير", 20, 350), ("تركيب", 1, 1500)])
+        self.assertEqual((draft.internal_id, draft.issue_date), ("S-77", "2026-10-05"))
+        self.assertEqual((inv["total"], inv["vat_amount"], inv["original_filename"]), (9690.0, 1190.0, "05_photo.jpg"))
+        self.assertTrue(inv["stored_path"])
+        self.assertIn("الفاتورة الورق", r.text)  # link to the uploaded file
+
+    def test_fill_from_pdf_without_item_rows(self):
+        s, cid = self.setup_client("fill-pdf@x.com")
+        inv_id = self.new_sale(s, cid)
+        r = self.upload_to_issue(s, inv_id, "07_arabic.pdf")
+        self.assertIn("الأصناف ماتقرتش", r.text)
+        draft = self.service.draft_for(self.db.get_client(cid), self.db.get_invoice(inv_id))
+        self.assertEqual(len(draft.lines), 1)
+        self.assertEqual(draft.lines[0].unit_price, 4800)  # the invoice's amount before VAT
+        self.assertEqual(self.db.get_invoice(inv_id)["vat_amount"], 672.0)
 
     def test_purchase_matching_with_eta(self):
         s, cid = self.setup_client("match@x.com")
