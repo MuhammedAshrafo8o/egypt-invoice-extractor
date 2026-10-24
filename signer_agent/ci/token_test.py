@@ -42,7 +42,9 @@ def put_on_token(lib, label, key, cert, cka_id):
     free = [sl for sl in lib.getSlotList(tokenPresent=True)
             if not (lib.getTokenInfo(sl).flags & PyKCS11.CKF_TOKEN_INITIALIZED)]
     lib.initToken(free[0], "5678", label)
-    slot = [sl for sl in lib.getSlotList(tokenPresent=True) if lib.getTokenInfo(sl).label.strip() == label][0]
+    named = [sl for sl in lib.getSlotList(tokenPresent=True)
+             if lib.getTokenInfo(sl).label.strip(" \x00") == label]
+    slot = named[0] if named else free[0]     # SoftHSM may keep the same slot id until it reloads
     s = lib.openSession(slot, PyKCS11.CKF_SERIAL_SESSION | PyKCS11.CKF_RW_SESSION)
     s.login("5678", user_type=PyKCS11.CKU_SO)
     s.initPin("1234")
