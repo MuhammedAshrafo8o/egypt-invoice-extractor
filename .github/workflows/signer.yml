@@ -1,6 +1,7 @@
 # Builds "DaftarSigner.exe" (the signing program accountants install next to their USB token),
 # tests it against a software token, and publishes it as the latest GitHub release.
 # Daftar links to: releases/latest/download/DaftarSigner.exe
+# Every step writes to ci-log.txt, which is attached to the release (or to a "failed" pre-release).
 name: Signing program (Windows)
 
 on:
@@ -15,6 +16,9 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
 
@@ -23,47 +27,68 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -r signer_agent/requirements.txt
+        id: install
+        continue-on-error: true
+        run: |
+          pip install -r signer_agent/requirements.txt *>&1 | Tee-Object -FilePath ci-log.txt -Append
+          if ($LASTEXITCODE -ne 0) { "INSTALL FAILED" | Tee-Object ci-log.txt -Append; exit 1 }
 
       - name: Build the .exe
-        run: >
-          pyinstaller --noconfirm --onefile --noconsole --name DaftarSigner
-          --icon signer_agent/daftar.ico --add-data "signer_agent/daftar.ico;."
-          --paths signer_agent signer_agent/daftar_signer.py
+        id: build
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: |
+          pyinstaller --noconfirm --onefile --noconsole --name DaftarSigner `
+            --icon signer_agent/daftar.ico --add-data "signer_agent/daftar.ico;." `
+            --paths signer_agent signer_agent/daftar_signer.py *>&1 | Tee-Object -FilePath ci-log.txt -Append
+          if (-not (Test-Path dist/DaftarSigner.exe)) { "BUILD FAILED" | Tee-Object ci-log.txt -Append; exit 1 }
+          "BUILD OK: $((Get-Item dist/DaftarSigner.exe).Length) bytes" | Tee-Object ci-log.txt -Append
 
       - name: Software token (SoftHSM)
-        shell: pwsh
+        id: softhsm
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download v2.5.0 -R disig/SoftHSM2-for-Windows -p "*.msi" -D softhsm
+          gh release view -R disig/SoftHSM2-for-Windows --json tagName,assets *>&1 | Tee-Object ci-log.txt -Append
+          gh release download -R disig/SoftHSM2-for-Windows -p "*x64*.msi" -D softhsm *>&1 | Tee-Object ci-log.txt -Append
+          if (-not (Get-ChildItem softhsm -Filter *.msi -ErrorAction SilentlyContinue)) {
+            gh release download -R disig/SoftHSM2-for-Windows -p "*.msi" -D softhsm *>&1 | Tee-Object ci-log.txt -Append }
           $msi = (Get-ChildItem softhsm -Filter *.msi | Select-Object -First 1).FullName
+          "msi=$msi" | Tee-Object ci-log.txt -Append
           Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait
-          $dll = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2-x64.dll | Select-Object -First 1).FullName
+          $dll = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2-x64.dll -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          if (-not $dll) { $dll = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2*.dll | Select-Object -First 1).FullName }
           $util = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2-util.exe | Select-Object -First 1).FullName
           $conf = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2.conf | Select-Object -First 1).FullName
+          "dll=$dll util=$util conf=$conf" | Tee-Object ci-log.txt -Append
+          if (-not $dll -or -not $util) { exit 1 }
           "SOFTHSM_DLL=$dll" >> $env:GITHUB_ENV
           "SOFTHSM_UTIL=$util" >> $env:GITHUB_ENV
           "SOFTHSM2_CONF=$conf" >> $env:GITHUB_ENV
           "DAFTAR_PKCS11=$dll" >> $env:GITHUB_ENV
-          Write-Host "dll=$dll util=$util conf=$conf"
 
-      - name: Start the .exe, take a screenshot, test signing
-        shell: pwsh
+      - name: Run the .exe, test signing, screenshot
+        if: steps.build.outcome == 'success'
         continue-on-error: true
         run: |
           Start-Process dist\DaftarSigner.exe
-          Start-Sleep -Seconds 8
-          python signer_agent/ci/token_test.py
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 10
+          try { (Invoke-WebRequest http://127.0.0.1:47321/status -Headers @{Origin="https://daftar-blue.vercel.app"} -UseBasicParsing).Content | Tee-Object ci-log.txt -Append }
+          catch { "STATUS FAILED: $_" | Tee-Object ci-log.txt -Append }
+          if ($env:SOFTHSM_DLL) { python signer_agent/ci/token_test.py *>&1 | Tee-Object -FilePath ci-log.txt -Append }
+          Start-Sleep -Seconds 3
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-          $bmp.Save("signer_agent/ci/screenshot.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $bmp.Save("screenshot.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          "screenshot saved" | Tee-Object ci-log.txt -Append
 
       - name: Publish
+        if: steps.build.outcome == 'success'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: signer-v1.0.${{ github.run_number }}
@@ -73,5 +98,15 @@ jobs:
           make_latest: true
           files: |
             dist/DaftarSigner.exe
-            signer_agent/ci/report.txt
-            signer_agent/ci/screenshot.png
+            ci-log.txt
+            screenshot.png
+
+      - name: Publish the log of a failed build
+        if: steps.build.outcome != 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: signer-failed-${{ github.run_number }}
+          name: failed build ${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          files: ci-log.txt
