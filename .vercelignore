@@ -1,0 +1,8 @@
+.env
+.venv
+data
+tessdata
+tests
+samples/invoices
+**/__pycache__
+*.pyc

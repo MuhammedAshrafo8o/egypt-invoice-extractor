@@ -574,6 +574,12 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             contents.append((upload.filename, await upload.read()))
             await upload.close()
         split = bool(form.get("split_pages"))
+        if form.get("batch"):
+            # The browser uploader sends one file per request (serverless hosts cap request size)
+            # and shows the results itself.
+            result = await run_in_threadpool(service.queue_files, client, contents, "upload", split,
+                                             None, None, form.get("batch"))
+            return JSONResponse({k: result[k] for k in ("queued", "skipped", "failed", "notes")})
         if len(contents) == 1 and not (split and pdf_page_count(*contents[0]) > 1):
             # One invoice: read it now and open it, so its fields are on screen.
             filename, content = contents[0]
@@ -604,6 +610,20 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         for msg in result["failed"][:10]:
             flash(request, msg, "error")
         return redirect(back)
+
+    async def run_jobs(request: Request):
+        """Called every few seconds by the database scheduler (pg_cron) on serverless hosts."""
+        auth = request.headers.get("authorization", "")
+        if not settings.cron_secret or not secrets.compare_digest(auth, f"Bearer {settings.cron_secret}"):
+            return PlainTextResponse("forbidden", status_code=403)
+        done = await run_in_threadpool(service.run_jobs_for, 40)
+        return JSONResponse({"done": done})
+
+    @login_required
+    async def kick_jobs(request: Request):
+        """The page that just uploaded files starts reading them right away (no wait for the scheduler)."""
+        done = await run_in_threadpool(service.run_jobs_for, 40)
+        return JSONResponse({"done": done})
 
     @login_required
     async def client_progress(request: Request):
@@ -759,13 +779,14 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         else:
             pos, ids = None, all_ids
         queue_info = {"pos": (pos + 1) if pos is not None else None, "total": len(all_ids)} if queue_mode else None
-        is_pdf = (invoice.get("stored_path") or "").lower().endswith(".pdf")
+        is_pdf = service.files.suffix(invoice.get("stored_path")) == ".pdf"
         page_count = 0
-        if is_pdf and Path(invoice["stored_path"]).is_file():
+        if is_pdf:
             try:
                 import pypdfium2 as pdfium
+                content = await run_in_threadpool(service.files.read, invoice["stored_path"])
                 with PDFIUM_LOCK:
-                    pdf = pdfium.PdfDocument(invoice["stored_path"])
+                    pdf = pdfium.PdfDocument(content)
                     page_count = min(len(pdf), 5)
                     pdf.close()
             except Exception:
@@ -790,11 +811,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         back = f"/clients/{client['id']}?period={invoice['period']}"
         if action == "delete":
             db.delete_invoice(invoice["id"])
-            if invoice.get("stored_path"):
-                stored = Path(invoice["stored_path"])
-                for cached in stored.parent.glob(f"{stored.stem}.page*.png"):
-                    cached.unlink(missing_ok=True)
-                stored.unlink(missing_ok=True)
+            service.files.delete(invoice.get("stored_path"))
             flash(request, "اتمسحت الفاتورة.", "success")
             return redirect("/review" if form.get("queue") == "1" else back)
         if action == "reprocess":
@@ -832,26 +849,30 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     @login_required
     async def invoice_file(request: Request):
         invoice = get_invoice_or_404(request, request.path_params["invoice_id"])
-        path = Path(invoice.get("stored_path") or "")
-        if not path.is_file() or settings.upload_dir.resolve() not in path.resolve().parents:
+        ref = invoice.get("stored_path")
+        if not await run_in_threadpool(service.files.exists, ref):
             return PlainTextResponse("الملف مش موجود", status_code=404)
-        return FileResponse(path, headers={"Cache-Control": "private, max-age=3600",
-                                           "Content-Disposition": "inline"})
+        headers = {"Cache-Control": "private, max-age=3600", "Content-Disposition": "inline"}
+        if service.files.mode == "local":
+            return FileResponse(Path(ref), headers=headers)
+        content = await run_in_threadpool(service.files.read, ref)
+        return Response(content, media_type=service.files.media_type(ref), headers=headers)
 
     @login_required
     async def invoice_page_image(request: Request):
         """First pages of a PDF rendered as PNG (PDF frames don't work well on phones)."""
         invoice = get_invoice_or_404(request, request.path_params["invoice_id"])
         page = request.path_params["page"]
-        path = Path(invoice.get("stored_path") or "")
-        if not path.is_file() or path.suffix.lower() != ".pdf" or not 0 <= page < 5:
+        ref = invoice.get("stored_path")
+        if service.files.suffix(ref) != ".pdf" or not 0 <= page < 5 or not await run_in_threadpool(service.files.exists, ref):
             return PlainTextResponse("not found", status_code=404)
-        cached = path.with_name(f"{path.stem}.page{page}.png")
+        cached = service.files.page_cache_path(ref, page)
         if not cached.exists():
             def render_page():
                 import pypdfium2 as pdfium
+                content = service.files.read(ref)
                 with PDFIUM_LOCK:
-                    pdf = pdfium.PdfDocument(str(path))
+                    pdf = pdfium.PdfDocument(content)
                     try:
                         if page >= len(pdf):
                             return False
@@ -889,6 +910,10 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                 except Exception:
                     log.exception("WhatsApp message failed")
 
+        if settings.serverless:
+            # No life after the response on serverless: queue the files now (fast), reading comes later.
+            await run_in_threadpool(work)
+            return JSONResponse({"received": len(messages)})
         # Answer Meta right away; process after the response is sent.
         return JSONResponse({"received": len(messages)}, background=BackgroundTask(work))
 
@@ -920,6 +945,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         Route("/clients/{client_id:int}/edit", client_update, methods=["POST"]),
         Route("/clients/{client_id:int}/upload", client_upload, methods=["POST"]),
         Route("/clients/{client_id:int}/progress.json", client_progress),
+        Route("/internal/run-jobs", run_jobs, methods=["POST", "GET"]),
+        Route("/jobs/kick", kick_jobs, methods=["POST"]),
         Route("/clients/{client_id:int}/export.xlsx", client_export),
         Route("/clients/{client_id:int}/approve", client_approve_bulk, methods=["POST"]),
         Route("/clients/{client_id:int}/report", client_report),

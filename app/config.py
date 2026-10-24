@@ -48,6 +48,9 @@ class Settings:
     whatsapp_display_number: str = ""
     # PKCS#11 library of the USB signing token (e.g. C:\\Windows\\System32\\eps2003csp11.dll)
     eta_pkcs11_lib: str = ""
+    storage: str = "local"           # local (disk) | db (inside the database, for serverless hosts)
+    serverless: bool = False         # no background threads; jobs run from /internal/run-jobs
+    cron_secret: str = ""            # protects /internal/run-jobs
     max_files_per_upload: int = 50   # files in one upload (each file = one invoice)
     upload_workers: int = 2          # files read at the same time in the background
     data_dir: Optional[Path] = None
@@ -77,7 +80,8 @@ def load_settings() -> Settings:
             key_file.write_text(secret)
     return Settings(
         secret_key=secret,
-        database_path=Path(os.environ.get("DATABASE_PATH", data_dir / "app.db")),
+        # DATABASE_URL (postgresql://…) uses PostgreSQL, e.g. Supabase; otherwise a SQLite file.
+        database_path=os.environ.get("DATABASE_URL") or Path(os.environ.get("DATABASE_PATH", data_dir / "app.db")),
         upload_dir=Path(os.environ.get("UPLOAD_DIR", data_dir / "uploads")),
         allow_signup=_bool("ALLOW_SIGNUP", True),
         max_upload_mb=int(os.environ.get("MAX_UPLOAD_MB", "15")),
@@ -93,6 +97,9 @@ def load_settings() -> Settings:
         vat_deadline_day=int(os.environ.get("VAT_DEADLINE_DAY", "0") or 0),
         whatsapp_display_number=os.environ.get("WHATSAPP_DISPLAY_NUMBER", ""),
         eta_pkcs11_lib=os.environ.get("ETA_PKCS11_LIB", ""),
+        storage=os.environ.get("STORAGE", "local").strip().lower() or "local",
+        serverless=_bool("SERVERLESS", bool(os.environ.get("VERCEL"))),
+        cron_secret=os.environ.get("CRON_SECRET", ""),
         max_files_per_upload=int(os.environ.get("MAX_FILES_PER_UPLOAD", "50") or 50),
         upload_workers=int(os.environ.get("UPLOAD_WORKERS", "2") or 2),
         data_dir=data_dir,

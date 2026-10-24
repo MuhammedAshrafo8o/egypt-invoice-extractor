@@ -106,6 +106,16 @@ class AppTestCase(unittest.TestCase):
         os.environ.update(DATA_DIR=str(cls.tmp), USE_AI="false", USE_OCR="false", WHATSAPP_APP_SECRET=APP_SECRET,
                           WHATSAPP_VERIFY_TOKEN=VERIFY_TOKEN, ALLOW_SIGNUP="true")
         os.environ.pop("ANTHROPIC_API_KEY", None)
+        # TEST_DATABASE_URL=postgresql://… runs the same tests on PostgreSQL (fresh schema per class).
+        pg_url = os.environ.get("TEST_DATABASE_URL")
+        if pg_url:
+            import psycopg
+            with psycopg.connect(pg_url, autocommit=True) as conn:
+                conn.execute("DROP SCHEMA public CASCADE")
+                conn.execute("CREATE SCHEMA public")
+                if os.environ.get("DB_SCHEMA"):
+                    conn.execute(f"DROP SCHEMA IF EXISTS {os.environ['DB_SCHEMA']} CASCADE")
+            os.environ.update(DATABASE_URL=pg_url, DB_INIT_SCHEMA="1")
         cls.settings = load_settings()
         cls.wa = FakeWhatsApp()
         cls.app = create_app(cls.settings, eta_client_factory=FakeETA, whatsapp_client=cls.wa)
@@ -125,6 +135,7 @@ class AppTestCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.app.state.service.stop_workers()
         cls.server.should_exit = True
         cls.thread.join(timeout=5)
         shutil.rmtree(cls.tmp, ignore_errors=True)
@@ -162,8 +173,14 @@ class AppTestCase(unittest.TestCase):
         """Several files are read in the background; wait until they're all done."""
         deadline = time.time() + timeout
         while self.db.pending_jobs(client_id) and time.time() < deadline:
+            self.drain()
             time.sleep(0.1)
         self.assertEqual(self.db.pending_jobs(client_id), 0, "background reading did not finish")
+
+    def drain(self):
+        """Serverless mode has no worker threads: run the job runner like the scheduler would."""
+        if self.app.state.settings.serverless:
+            self.app.state.service.run_jobs_for(10)
 
     def invoices(self, client_id):
         return {i["original_filename"]: i for i in self.db.list_invoices(client_id)}
@@ -474,6 +491,7 @@ class WhatsAppTests(AppTestCase):
         while time.time() < end:
             if predicate():
                 return True
+            self.drain()
             time.sleep(0.05)
         return False
 
@@ -591,6 +609,33 @@ class BulkUploadTests(AppTestCase):
         r = self.post_files(s, cid, files[:1])
         self.assertIn("اترفع قبل كده", r.text)
         self.assertEqual(len(self.db.list_invoices(cid)), 6)
+
+    def test_one_file_per_request_batch_and_job_runner(self):
+        """What the browser uploader does on serverless hosts, and the runner the scheduler calls."""
+        s = self.session("bulk-batch@x.com")
+        cid = self.create_client(s, "شركة الدلتا", "300112455")
+        results = []
+        for name in ("01_digital_ok.pdf", "07_arabic.pdf", "01_digital_ok.pdf"):
+            token = self.csrf(s, f"{self.base}/clients/{cid}")
+            r = s.post(f"{self.base}/clients/{cid}/upload", headers={"Accept": "application/json"},
+                       data={"csrf": token, "period": PERIOD, "batch": "b1"},
+                       files=[("files", (name, (SAMPLES / name).read_bytes(), "application/pdf"))])
+            results.append(r.json())
+        self.assertEqual([x["queued"] for x in results], [1, 1, 0])
+        self.assertIn("اترفع قبل كده", results[2]["skipped"][0])
+        self.wait_for_reading(cid)
+        progress = s.get(f"{self.base}/clients/{cid}/progress.json").json()
+        self.assertEqual((progress["total"], progress["done"]), (2, 2))  # one batch across requests
+        # The scheduler endpoint needs the secret.
+        self.assertEqual(requests.post(self.base + "/internal/run-jobs").status_code, 403)
+        settings = self.app.state.settings
+        old, settings.cron_secret = settings.cron_secret, "s3cret"
+        try:
+            r = requests.post(self.base + "/internal/run-jobs", headers={"Authorization": "Bearer s3cret"})
+        finally:
+            settings.cron_secret = old
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("done", r.json())
 
     def test_upload_limit(self):
         s = self.session("bulk-limit@x.com")

@@ -247,7 +247,12 @@
   var zone = document.getElementById('fill-zone');
   if (zone) {
     var file = document.getElementById('fill-file');
-    var go = function () { if (file.files.length) document.getElementById('fill-submit').click(); };
+    var go = function () {
+      if (!file.files.length) return;
+      var btn = document.getElementById('fill-submit');
+      if (window.daftarSubmitWithFiles) window.daftarSubmitWithFiles(document.getElementById('fill-form'), file, btn);
+      else btn.click();
+    };
     file.addEventListener('change', go);
     ['dragenter', 'dragover'].forEach(function (ev) {
       zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('over'); });

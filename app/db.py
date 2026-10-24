@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -102,6 +103,22 @@ CREATE TABLE IF NOT EXISTS upload_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON upload_jobs(state, id);
 
+-- Uploaded files kept in the database (STORAGE=db, used on serverless hosts without a disk).
+CREATE TABLE IF NOT EXISTS stored_files (
+    id          INTEGER PRIMARY KEY,
+    client_id   INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    content     BLOB NOT NULL,
+    size        INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_runner (
+    id     INTEGER PRIMARY KEY,
+    until  TEXT NOT NULL
+);
+INSERT OR IGNORE INTO job_runner(id, until) VALUES (1, '2000-01-01T00:00:00');
+
 CREATE TABLE IF NOT EXISTS whatsapp_messages (
     message_id  TEXT PRIMARY KEY,
     phone       TEXT NOT NULL,
@@ -123,15 +140,93 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+class Row(dict):
+    """A dict row that also answers row[0] (like sqlite3.Row)."""
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _PgCursor:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        return self._cur.fetchone() if self._cur.description else None
+
+    def fetchall(self):
+        return self._cur.fetchall() if self._cur.description else []
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+
+class _PgConn:
+    """Lets the SQLite-style queries (? placeholders) run on PostgreSQL through psycopg."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    @staticmethod
+    def _sql(sql: str) -> str:
+        return sql.replace("%", "%%").replace("?", "%s")
+
+    def execute(self, sql: str, args=()):
+        cur = self.raw.cursor()
+        cur.execute(self._sql(sql), tuple(args or ()))
+        return _PgCursor(cur)
+
+    def executemany(self, sql: str, rows):
+        cur = self.raw.cursor()
+        cur.executemany(self._sql(sql), [tuple(r) for r in rows])
+        return _PgCursor(cur)
+
+
+def _pg_row_factory(cursor):
+    names = [c.name for c in cursor.description] if cursor.description else []
+
+    def make(values):
+        return Row(zip(names, values))
+    return make
+
+
 class Database:
-    def __init__(self, path: Path):
+    """SQLite file (default, one machine) or PostgreSQL (DATABASE_URL, e.g. Supabase)."""
+
+    def __init__(self, path):
+        self.url = str(path) if str(path).startswith(("postgres://", "postgresql://")) else None
+        self.pg = bool(self.url)
+        self._lock = threading.Lock()
+        self._local = threading.local()
+        if self.pg:
+            if os.environ.get("DB_INIT_SCHEMA", "").lower() in ("1", "true", "yes"):
+                self.init_pg_schema()
+            return
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
         with self.connect() as conn:
             conn.executescript(SCHEMA)
             self._migrate(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_invoices_hash ON invoices(client_id, file_hash)")
+
+    def init_pg_schema(self) -> None:
+        sql = (Path(__file__).parent / "schema_pg.sql").read_text(encoding="utf-8")
+        schema = os.environ.get("DB_SCHEMA")
+        if schema:
+            sql = f"CREATE SCHEMA IF NOT EXISTS {schema};\n" + sql
+        with self.connect() as conn:
+            conn.raw.execute(sql)
+
+    def _insert(self, conn, sql: str, args) -> int:
+        if self.pg:
+            return conn.execute(sql + " RETURNING id", args).fetchone()["id"]
+        return conn.execute(sql, args).lastrowid
 
     # Columns added after the first release; older databases get them here.
     MIGRATIONS = {
@@ -139,7 +234,7 @@ class Database:
         "invoices": {"eta_draft": "TEXT", "eta_state": "TEXT", "eta_message": "TEXT",
                      "eta_long_id": "TEXT", "eta_check": "TEXT", "file_hash": "TEXT"},
         "parties": {"details_json": "TEXT"},
-        "upload_jobs": {"reply_to": "TEXT", "message_id": "TEXT"},
+        "upload_jobs": {"reply_to": "TEXT", "message_id": "TEXT", "split": "INTEGER NOT NULL DEFAULT 0"},
     }
 
     def _migrate(self, conn) -> None:
@@ -149,8 +244,49 @@ class Database:
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
+    def _pg_connection(self):
+        """One connection per thread, reused (serverless functions stay warm between requests).
+
+        DATABASE_URL may list several URLs separated by ' | ' (e.g. two pooler hosts); the first
+        that accepts the connection is used from then on."""
+        import psycopg
+        conn = getattr(self._local, "conn", None)
+        if conn is None or conn.closed or conn.broken:
+            candidates = [u.strip() for u in self.url.split(" | ") if u.strip()]
+            if getattr(Database, "_good_url", None) in candidates:
+                candidates.remove(Database._good_url)
+                candidates.insert(0, Database._good_url)
+            last = None
+            for url in candidates:
+                try:
+                    conn = psycopg.connect(url, row_factory=_pg_row_factory, prepare_threshold=None,
+                                           connect_timeout=10)
+                    Database._good_url = url
+                    break
+                except psycopg.OperationalError as exc:
+                    last = exc
+            else:
+                raise last
+            self._local.conn = conn
+        return conn
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        if self.pg:
+            raw = self._pg_connection()
+            schema = os.environ.get("DB_SCHEMA")
+            try:
+                if schema:  # per transaction: works through a transaction-mode pooler
+                    raw.execute(f"SET LOCAL search_path TO {schema}, public")
+                yield _PgConn(raw)
+                raw.commit()
+            except Exception:
+                try:
+                    raw.rollback()
+                except Exception:
+                    self._local.conn = None
+                raise
+            return
         conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -169,11 +305,9 @@ class Database:
     # ---------------------------------------------------------------- accounts
     def create_accountant(self, name: str, email: str, password: str) -> int:
         with self.connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO accountants(name, email, password_hash, created_at) VALUES (?,?,?,?)",
-                (name.strip(), email.strip().lower(), hash_password(password), now()),
-            )
-            return cur.lastrowid
+            return self._insert(
+                conn, "INSERT INTO accountants(name, email, password_hash, created_at) VALUES (?,?,?,?)",
+                (name.strip(), email.strip().lower(), hash_password(password), now()))
 
     def authenticate(self, email: str, password: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
@@ -195,13 +329,11 @@ class Database:
     def create_client(self, accountant_id: int, name: str, tax_id: str = "", whatsapp_phone: str = "",
                       notes: str = "", eta_client_id: str = "", eta_client_secret: str = "") -> int:
         with self.connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO clients(accountant_id, name, tax_id, whatsapp_phone, notes, eta_client_id, "
+            return self._insert(
+                conn, "INSERT INTO clients(accountant_id, name, tax_id, whatsapp_phone, notes, eta_client_id, "
                 "eta_client_secret, created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (accountant_id, name.strip(), digits(tax_id), normalize_phone(whatsapp_phone),
-                 notes.strip() or None, eta_client_id.strip() or None, eta_client_secret.strip() or None, now()),
-            )
-            return cur.lastrowid
+                 notes.strip() or None, eta_client_id.strip() or None, eta_client_secret.strip() or None, now()))
 
     def update_client(self, client_id: int, **fields) -> None:
         allowed = {"name", "tax_id", "whatsapp_phone", "notes", "eta_client_id", "eta_client_secret", "eta_profile"}
@@ -287,11 +419,8 @@ class Database:
             "issues_json": "[]", "created_at": now(), "updated_at": now(), **data,
         }
         with self.connect() as conn:
-            cur = conn.execute(
-                f"INSERT INTO invoices({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                [row.get(c) for c in cols],
-            )
-            return cur.lastrowid
+            return self._insert(conn, f"INSERT INTO invoices({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                [row.get(c) for c in cols])
 
     def update_invoice(self, invoice_id: int, data: dict) -> None:
         allowed = {"direction", "status", "approved", "source_type", "period", "eta_uuid", "eta_url",
@@ -611,6 +740,25 @@ class Database:
             row = conn.execute(sql + " ORDER BY id LIMIT 1", params).fetchone()
         return _invoice_dict(row) if row else None
 
+    # ------------------------------------------------------------ stored files
+    def save_blob(self, client_id: Optional[int], filename: str, content: bytes) -> int:
+        with self.connect() as conn:
+            return self._insert(conn, "INSERT INTO stored_files(client_id, filename, content, size, created_at) "
+                                      "VALUES (?,?,?,?,?)", (client_id, filename, content, len(content), now()))
+
+    def get_blob(self, file_id: int) -> Optional[bytes]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT content FROM stored_files WHERE id = ?", (file_id,)).fetchone()
+        return row["content"] if row else None
+
+    def blob_exists(self, file_id: int) -> bool:
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM stored_files WHERE id = ?", (file_id,)).fetchone() is not None
+
+    def delete_blob(self, file_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM stored_files WHERE id = ?", (file_id,))
+
     # ------------------------------------------------------------ upload jobs
     def file_seen(self, client_id: int, file_hash: str) -> Optional[dict]:
         """The same file (byte for byte) already stored or waiting for this client."""
@@ -633,6 +781,12 @@ class Database:
 
     def claim_job(self) -> Optional[dict]:
         """Take the oldest queued job (atomic, so several workers never read the same file)."""
+        if self.pg:
+            with self.connect() as conn:
+                row = conn.execute(
+                    "UPDATE upload_jobs SET state = 'working' WHERE id = (SELECT id FROM upload_jobs "
+                    "WHERE state = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *").fetchone()
+            return dict(row) if row else None
         with self._lock, self.connect() as conn:
             row = conn.execute("SELECT * FROM upload_jobs WHERE state = 'queued' ORDER BY id LIMIT 1").fetchone()
             if not row:
@@ -650,6 +804,26 @@ class Database:
             return conn.execute("SELECT 1 FROM upload_jobs WHERE client_id = ? AND id < ? "
                                 "AND state IN ('queued', 'working') LIMIT 1",
                                 (job["client_id"], job["id"])).fetchone() is not None
+
+    def acquire_runner(self, seconds: int) -> bool:
+        """Lease for the serverless job runner: only one runs at a time (works through a pooler)."""
+        stamp = datetime.now()
+        with self.connect() as conn:
+            cur = conn.execute("UPDATE job_runner SET until = ? WHERE id = 1 AND until < ?",
+                               ((stamp + timedelta(seconds=seconds)).isoformat(timespec="seconds"),
+                                stamp.isoformat(timespec="seconds")))
+            return cur.rowcount == 1
+
+    def release_runner(self) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE job_runner SET until = ? WHERE id = 1", ("2000-01-01T00:00:00",))
+
+    def requeue_stale_jobs(self, minutes: int = 5) -> int:
+        """Serverless: a job left 'working' by a runner that was cut off goes back to the queue."""
+        cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+        with self.connect() as conn:
+            return conn.execute("UPDATE upload_jobs SET state = 'queued' WHERE state = 'working' AND created_at < ? "
+                                "AND (finished_at IS NULL)", (cutoff,)).rowcount
 
     def requeue_interrupted_jobs(self) -> int:
         with self.connect() as conn:
@@ -701,12 +875,10 @@ class Database:
     def record_whatsapp(self, message_id: str, phone: str, invoice_id: Optional[int] = None) -> bool:
         """Returns False if the message was already recorded (Meta retries webhooks)."""
         with self._lock, self.connect() as conn:
-            try:
-                conn.execute("INSERT INTO whatsapp_messages(message_id, phone, invoice_id, created_at) "
-                             "VALUES (?,?,?,?)", (message_id, phone, invoice_id, now()))
-                return True
-            except sqlite3.IntegrityError:
-                return False
+            cur = conn.execute("INSERT INTO whatsapp_messages(message_id, phone, invoice_id, created_at) "
+                               "VALUES (?,?,?,?) ON CONFLICT (message_id) DO NOTHING",
+                               (message_id, phone, invoice_id, now()))
+            return cur.rowcount == 1
 
     def link_whatsapp_invoice(self, message_id: str, invoice_id: int) -> None:
         with self.connect() as conn:

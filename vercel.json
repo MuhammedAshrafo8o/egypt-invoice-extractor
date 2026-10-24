@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["fra1"],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "memory": 2048,
+      "excludeFiles": "{tests/**,samples/**,data/**,tessdata/**,**/__pycache__/**,*.md,setup.sh,setup.ps1,Dockerfile}"
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
+}

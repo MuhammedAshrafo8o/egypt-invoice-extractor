@@ -207,6 +207,8 @@ class InvoiceService:
         self.eta_client_factory = eta_client_factory
         from .crypto import SecretBox, load_key
         self.box = SecretBox(load_key(settings.data_dir or settings.database_path.parent))
+        from .storage import FileStore
+        self.files = FileStore(settings, db)
         self._wake = threading.Event()   # set when new files are queued
         self._store_lock = threading.RLock()
         self.job_listeners: list = []
@@ -316,7 +318,8 @@ class InvoiceService:
         return len(approved)
 
     # ------------------------------------------------------------ uploads
-    def store_file(self, client_id: int, filename: str, content: bytes) -> Path:
+    def store_file(self, client_id: int, filename: str, content: bytes) -> str:
+        """Validate and keep the file. Returns its storage reference (path, or db:… on serverless)."""
         ext = Path(filename or "").suffix.lower()
         if ext not in SUPPORTED_EXTS:
             raise UploadError(f"نوع الملف {ext or '؟'} مش مدعوم. المدعوم: PDF وصور (JPG, PNG, WEBP).")
@@ -324,11 +327,7 @@ class InvoiceService:
             raise UploadError(f"الملف أكبر من {self.settings.max_upload_mb} ميجا.")
         if not content:
             raise UploadError("الملف فاضي.")
-        folder = self.settings.upload_dir / str(client_id) / current_period()
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{uuidlib.uuid4().hex}{ext}"
-        path.write_bytes(content)
-        return path
+        return self.files.save(client_id, filename, content, current_period())
 
     def encrypt_stored_secrets(self) -> int:
         """Older databases kept the ETA Client Secret as plain text: encrypt those in place."""
@@ -357,11 +356,11 @@ class InvoiceService:
 
     def queue_files(self, client, files: list[tuple[str, bytes]], channel: str = "upload",
                     split_pages: bool = False, reply_to: Optional[str] = None,
-                    message_id: Optional[str] = None) -> dict:
+                    message_id: Optional[str] = None, batch: Optional[str] = None) -> dict:
         """Store files now and read them in the background. Same file twice (in this batch or before) is skipped.
 
         split_pages: a PDF with several pages is several invoices (one per page)."""
-        batch = uuidlib.uuid4().hex[:12]
+        batch = (batch or "")[:40] or uuidlib.uuid4().hex[:12]
         queued, skipped, failed, seen, notes = [], [], [], set(), []
         expanded = []
         for filename, content in files:
@@ -402,9 +401,37 @@ class InvoiceService:
             self._wake.set()
         return {"queued": len(queued), "skipped": skipped, "failed": failed, "batch": batch, "notes": notes}
 
+    def run_jobs_for(self, seconds: float = 45, workers: Optional[int] = None) -> int:
+        """Serverless: read queued files for up to `seconds`, a few at a time. One runner at a time."""
+        import time
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+        if not self.db.acquire_runner(int(seconds) + 15):
+            return 0
+        done = 0
+        deadline = time.monotonic() + seconds
+        reserve = min(20.0, seconds * 0.4)  # time kept for the last files to finish reading
+        try:
+            self.db.requeue_stale_jobs()
+            with ThreadPoolExecutor(max_workers=max(1, workers or self.settings.upload_workers)) as pool:
+                running = set()
+                while True:
+                    while len(running) < pool._max_workers and time.monotonic() < deadline - reserve:
+                        job = self.db.claim_job()
+                        if not job:
+                            break
+                        running.add(pool.submit(self.run_job, job))
+                    if not running:
+                        break
+                    finished, running = wait(running, timeout=1, return_when=FIRST_COMPLETED)
+                    done += len(finished)
+        finally:
+            self.db.release_runner()
+        return done
+
     def start_workers(self, count: int = 2) -> None:
-        if getattr(self, "_workers", None):
-            return
+        if getattr(self, "_workers", None) or self.settings.serverless:
+            return  # serverless: jobs are run by run_jobs_for() from /internal/run-jobs
         self.db.requeue_interrupted_jobs()
         self._stop = threading.Event()
         self._workers = [threading.Thread(target=self._work_loop, name=f"reader-{n}", daemon=True)
@@ -416,10 +443,18 @@ class InvoiceService:
         if getattr(self, "_workers", None):
             self._stop.set()
             self._wake.set()
+            for t in self._workers:
+                t.join(timeout=15)
+            self._workers = []
 
     def _work_loop(self) -> None:
         while not self._stop.is_set():
-            job = self.db.claim_job()
+            try:
+                job = self.db.claim_job()
+            except Exception:  # database hiccup: keep the worker alive
+                log.exception("Could not take the next job")
+                self._stop.wait(3)
+                continue
             if not job:
                 self._wake.wait(1.0)
                 self._wake.clear()
@@ -432,12 +467,13 @@ class InvoiceService:
             self.db.finish_job(job["id"], "failed", message="العميل اتمسح.")
             return
         try:
-            inv = self.read_stored(client, Path(job["stored_path"]), job["filename"])
+            inv = self.read_stored(client, job["stored_path"], job["filename"])
             # Read in parallel, but save in upload order: the first copy of an invoice stays the
             # original and later copies are the ones marked as duplicates.
             with self._turns:
-                self._turns.wait_for(lambda: not self.db.earlier_jobs_open(job), timeout=600)
-            invoice_id = self.process_stored(client, Path(job["stored_path"]), job["filename"], job["channel"],
+                self._turns.wait_for(lambda: not self.db.earlier_jobs_open(job),
+                                     timeout=30 if self.settings.serverless else 600)
+            invoice_id = self.process_stored(client, job["stored_path"], job["filename"], job["channel"],
                                              file_hash=job["file_hash"], inv=inv)
             self.db.finish_job(job["id"], "done", invoice_id)
             job.update(state="done", invoice_id=invoice_id)
@@ -454,11 +490,12 @@ class InvoiceService:
             except Exception:
                 log.exception("Job listener failed")
 
-    def read_stored(self, client, path: Path, original_filename: str) -> Invoice:
+    def read_stored(self, client, ref: str, original_filename: str) -> Invoice:
         """The slow part (AI / OCR / ETA lookups). Safe to run for several files at once."""
         eta = None if self.settings.eta_demo else self.eta_client(client)
-        inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr,
-                           eta_fetcher=eta.fetch_fields if eta else None)
+        with self.files.local_path(str(ref)) as path:
+            inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr,
+                               eta_fetcher=eta.fetch_fields if eta else None)
         inv.source_file = original_filename
         return inv
 
@@ -485,9 +522,9 @@ class InvoiceService:
         return self.db.insert_invoice(client["id"], record)
 
     def reprocess(self, client, invoice: dict) -> int:
-        if not invoice.get("stored_path") or not Path(invoice["stored_path"]).exists():
+        if not self.files.exists(invoice.get("stored_path")):
             raise UploadError("الملف الأصلي مش موجود.")
-        return self.process_stored(client, Path(invoice["stored_path"]), invoice["original_filename"],
+        return self.process_stored(client, invoice["stored_path"], invoice["original_filename"],
                                    existing_id=invoice["id"])
 
     # -------------------------------------------------------------- editing
@@ -741,7 +778,8 @@ class InvoiceService:
             path = self.store_file(client["id"], filename, content)
         except UploadError as exc:
             raise IssueError([str(exc)])
-        inv = process_file(path, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr)
+        with self.files.local_path(path) as local:
+            inv = process_file(local, use_ai=self.settings.use_ai, use_ocr=self.settings.use_ocr)
         current = self.draft_for(client, invoice)
         draft = self.draft_from_extracted(client, inv, base=current)
         self.db.update_invoice(invoice["id"], {"stored_path": str(path), "original_filename": filename,

@@ -126,3 +126,108 @@
   palette.addEventListener('click', function (e) { if (e.target === palette) close(); });
   document.querySelectorAll('[data-open-palette]').forEach(function (b) { b.addEventListener('click', open); });
 })();
+
+/* ------------------------------------------------ uploads: smaller photos, one file per request */
+(function () {
+  'use strict';
+  var MAX_SIDE = 2400, MIN_BYTES = 1200000;
+
+  // Phone photos are 3-8 MB; 2400 px JPEG is plenty to read an invoice and uploads much faster.
+  function shrink(file) {
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size < MIN_BYTES || !window.createImageBitmap) {
+      return Promise.resolve(file);
+    }
+    return createImageBitmap(file, { imageOrientation: 'from-image' }).then(function (bmp) {
+      var scale = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
+      canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      return new Promise(function (resolve) {
+        canvas.toBlob(function (blob) {
+          if (!blob || blob.size >= file.size) return resolve(file);
+          resolve(new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' }));
+        }, 'image/jpeg', 0.85);
+      });
+    }).catch(function () { return file; });
+  }
+
+  function replaceFiles(input, files) {
+    try {
+      var dt = new DataTransfer();
+      files.forEach(function (f) { dt.items.add(f); });
+      input.files = dt.files;
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function busy(text, sub) {
+    var b = document.getElementById('busy');
+    if (!b) return;
+    document.getElementById('busy-text').textContent = text;
+    document.getElementById('busy-sub').textContent = sub || '';
+    b.hidden = false;
+  }
+
+  // Shrink the photos in a file input, then submit its form normally.
+  window.daftarSubmitWithFiles = function (form, input, submitButton) {
+    var files = Array.prototype.slice.call(input.files);
+    busy('بيجهّز الصور…');
+    return Promise.all(files.map(shrink)).then(function (small) {
+      replaceFiles(input, small);
+      submitButton.click();
+    });
+  };
+
+  // Serverless hosts cap one request at a few MB: send the files one by one, then reload.
+  window.daftarUploadEach = function (form, input) {
+    var files = Array.prototype.slice.call(input.files);
+    var batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    var messages = [], sent = 0, queued = 0;
+    function next(i) {
+      if (i >= files.length) return Promise.resolve();
+      busy('بيرفع ' + (i + 1) + ' من ' + files.length + '…', 'القراية بتبدأ أول ما الرفع يخلص، وبتكمل في الخلفية.');
+      return shrink(files[i]).then(function (f) {
+        var data = new FormData();
+        data.append('csrf', form.elements.csrf.value);
+        data.append('period', form.elements.period.value);
+        data.append('batch', batch);
+        if (form.elements.split_pages && form.elements.split_pages.checked) data.append('split_pages', '1');
+        data.append('files', f, f.name);
+        return fetch(form.action, { method: 'POST', body: data, headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.json() : { failed: [f.name + ': الرفع فشل (' + r.status + ')'] }; })
+          .catch(function () { return { failed: [f.name + ': الرفع فشل — اتأكد من النت'] }; })
+          .then(function (res) {
+            sent += 1; queued += res.queued || 0;
+            ['notes', 'skipped', 'failed'].forEach(function (k) {
+              (res[k] || []).forEach(function (m) { messages.push({ kind: k === 'failed' ? 'error' : 'info', text: m }); });
+            });
+          });
+      }).then(function () { return next(i + 1); });
+    }
+    return next(0).then(function () {
+      if (queued) {
+        messages.unshift({ kind: 'success', text: 'اترفع ' + queued + ' فاتورة، وبيتقروا دلوقتي في الخلفية — تقدر تكمّل شغلك، والفواتير بتظهر هنا أول بأول.' });
+        fetch('/jobs/kick', { method: 'POST', credentials: 'same-origin', keepalive: true }).catch(function () {});
+      }
+      try { sessionStorage.setItem('daftar-flash', JSON.stringify(messages)); } catch (e) {}
+      location.reload();
+    });
+  };
+
+  // Messages carried over a reload by the uploader.
+  try {
+    var saved = JSON.parse(sessionStorage.getItem('daftar-flash') || '[]');
+    sessionStorage.removeItem('daftar-flash');
+    if (saved.length) {
+      var main = document.querySelector('main.main');
+      var box = document.createElement('div'); box.className = 'flashes';
+      saved.forEach(function (m) {
+        var d = document.createElement('div'); d.className = 'flash flash-' + m.kind; d.setAttribute('role', 'status');
+        var span = document.createElement('span'); span.textContent = m.text; d.appendChild(span);
+        var x = document.createElement('button'); x.type = 'button'; x.setAttribute('data-dismiss', ''); x.textContent = '×';
+        d.appendChild(x); box.appendChild(d);
+      });
+      if (main) main.insertBefore(box, main.firstChild);
+    }
+  } catch (e) {}
+})();

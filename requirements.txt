@@ -14,6 +14,7 @@ python-multipart>=0.0.9
 itsdangerous>=2.1
 openpyxl>=3.1
 python-dotenv>=1.0
+psycopg[binary]>=3.2   # PostgreSQL (DATABASE_URL, e.g. Supabase); not needed for the local SQLite mode
 cryptography>=42      # e-invoice signature (CAdES-BES)
 # PyKCS11>=1.5        # only to sign with a USB token: pip install PyKCS11
 
