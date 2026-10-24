@@ -2,7 +2,7 @@
 {% from "_icons.html" import icon %}
 {% block title %}الرئيسية{% endblock %}
 {% block content %}
-<div class="page-head">
+<div class="page-head home-head">
   <div>
     <h1>أهلًا، {{ user.name }}</h1>
     <p class="sub">ملخص فواتير {{ period|period_label }} لكل عملاءك.</p>
@@ -15,6 +15,25 @@
 </div>
 
 {% if clients %}
+{# Phones: one clear action, then four numbers. Desktop keeps the side-by-side card below. #}
+<section class="m-summary">
+  <a class="m-action {% if not pending_total %}clear{% endif %}" href="{{ '/review' if pending_total else '#clients' }}">
+    {% if pending_total %}
+      <span class="m-count">{{ pending_total }}</span>
+      <span class="m-what">{{ 'فاتورة' if pending_total == 1 or pending_total > 10 else 'فواتير' }} محتاجة مراجعة<small>الباقي اتقرا واتراجع لوحده</small></span>
+      <span class="btn btn-stamp">{{ icon('review') }} ابدأ</span>
+    {% else %}
+      <span class="m-what">مفيش حاجة مستنياك<small>كل فواتير {{ period|period_label }} اتراجعت</small></span>
+    {% endif %}
+  </a>
+  <dl class="m-tiles">
+    <div><dt>صافي الضريبة</dt><dd class="num-text">{{ totals.net_vat|money }}</dd></div>
+    <div class="{% if deadline.days_left <= 5 %}soon{% endif %}"><dt>إقرار {{ deadline.period|period_label }}</dt>
+      <dd>{% if deadline.days_left == 0 %}النهارده{% elif deadline.days_left == 1 %}بكرة{% else %}باقي {{ deadline.days_left }} يوم{% endif %}</dd></div>
+    <div><dt>جاهزين للإقرار</dt><dd>{{ totals.ready }} <small>من {{ totals.clients }} عميل</small></dd></div>
+    <div><dt>فواتير الشهر</dt><dd>{{ totals.invoices }}</dd></div>
+  </dl>
+</section>
 <section class="today">
   <div class="today-main {% if not pending_total %}clear{% endif %}">
     {% if pending_total %}
@@ -94,20 +113,20 @@
             {% if c.days_since is not none and c.days_since > 20 %}<span class="tag tag-warn">مابعتش من {{ c.days_since }} يوم</span>{% endif %}</div></td>
         <td class="c-wide">
           {% if c.ready %}
-            <span class="stamp" title="كل فواتير الشهر اتراجعت">جاهز<br>للإقرار</span>
+            <span class="stamp" title="كل فواتير الشهر اتراجعت">جاهز <br>للإقرار</span>
           {% elif c.invoice_count %}
             <div class="progress"><span class="bar"><i style="width: {{ (100 * c.done / c.invoice_count)|round|int }}%"></i></span>
               <span class="count">{{ c.done }} من {{ c.invoice_count }}</span></div>
           {% else %}<span class="muted small">لسه مفيش فواتير</span>{% endif %}
         </td>
-        <td>
+        <td class="c-chips">
           {% if c.error_count %}<span class="chip chip-error">{{ c.error_count }} خطأ</span>{% endif %}
           {% if c.review_count %}<span class="chip chip-review">{{ c.review_count }} مراجعة</span>{% endif %}
           {% if not c.pending %}<span class="muted">—</span>{% endif %}
         </td>
-        <td class="num">{{ c.output_vat|money }}</td>
-        <td class="num">{{ c.input_vat|money }}</td>
-        <td class="num strong">{{ c.net_vat|money }}</td>
+        <td class="num c-detail">{{ c.output_vat|money }}</td>
+        <td class="num c-detail">{{ c.input_vat|money }}</td>
+        <td class="num strong c-net">{{ c.net_vat|money }}</td>
       </tr>
     {% endfor %}
     </tbody>
