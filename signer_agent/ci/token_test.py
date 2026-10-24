@@ -32,6 +32,13 @@ def cert_for(key, cn):
             .not_valid_after(now + timedelta(days=365)).sign(key, hashes.SHA256()))
 
 
+def serial_der(n: int) -> tuple:
+    raw = n.to_bytes((n.bit_length() + 7) // 8 or 1, "big")
+    if raw[0] & 0x80:
+        raw = b"\x00" + raw
+    return (0x02, len(raw)) + tuple(raw)
+
+
 def b(n: int) -> tuple:
     return tuple(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
 
@@ -65,6 +72,9 @@ def put_on_token(lib, label, key, cert, cka_id):
                                  (PyKCS11.CKA_VALUE, tuple(key.private_numbers().private_value.to_bytes(32, "big")))])
     s.createObject([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE), (PyKCS11.CKA_CERTIFICATE_TYPE, PyKCS11.CKC_X_509),
                     (PyKCS11.CKA_TOKEN, True), (PyKCS11.CKA_ID, tuple(cka_id)), (PyKCS11.CKA_LABEL, label),
+                    (PyKCS11.CKA_SUBJECT, tuple(cert.subject.public_bytes())),
+                    (PyKCS11.CKA_ISSUER, tuple(cert.issuer.public_bytes())),
+                    (PyKCS11.CKA_SERIAL_NUMBER, serial_der(cert.serial_number)),
                     (PyKCS11.CKA_VALUE, tuple(cert.public_bytes(serialization.Encoding.DER)))])
     s.logout()
     s.closeSession()
