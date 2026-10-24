@@ -8,21 +8,27 @@ version = "0.2.0"
 description = "Extract and validate data from Egyptian invoices (PDF and images) for VAT returns"
 readme = "README.md"
 requires-python = ">=3.10"
+# The core needed to run the app (this list is what Vercel installs, so it stays small).
 dependencies = [
   "pdfplumber>=0.11",
   "pypdfium2>=4.0",
-  "opencv-python-headless>=4.8",
-  "numpy>=1.24",
   "Pillow>=10.0",
   "requests>=2.31",
+  "cryptography>=42",
+  "starlette>=0.40",
+  "jinja2>=3.1",
+  "python-multipart>=0.0.9",
+  "itsdangerous>=2.1",
+  "openpyxl>=3.1",
+  "python-dotenv>=1.0",
+  "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]
+# Reading e-invoice QR codes from photos/PDFs (large: ~150 MB, so not on serverless hosts).
+qr = ["opencv-python-headless>=4.8", "numpy>=1.24"]
+server = ["uvicorn[standard]>=0.30"]
 samples = ["reportlab>=4.0"]
-web = [
-  "starlette>=0.40", "uvicorn[standard]>=0.30", "jinja2>=3.1", "python-multipart>=0.0.9",
-  "itsdangerous>=2.1", "openpyxl>=3.1", "python-dotenv>=1.0",
-]
 
 [project.scripts]
 invoice-extractor = "invoice_extractor.cli:main"

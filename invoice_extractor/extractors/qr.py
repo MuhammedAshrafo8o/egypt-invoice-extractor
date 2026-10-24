@@ -5,15 +5,24 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import cv2
-import numpy as np
 from PIL import Image
 
-_detector = cv2.QRCodeDetector()
+try:  # OpenCV is optional (large); without it QR codes are simply not read.
+    import cv2
+    import numpy as np
+    _detector = cv2.QRCodeDetector()
+except ImportError:  # pragma: no cover - depends on the install
+    cv2 = np = _detector = None
+
+
+def is_available() -> bool:
+    return _detector is not None
 
 
 def decode_qr_from_image(image: Image.Image) -> list[str]:
     """Return the decoded text of every QR code found in the image."""
+    if _detector is None:
+        return []
     rgb = np.array(image.convert("RGB"))
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     found: list[str] = []
@@ -31,6 +40,8 @@ def decode_qr_from_image(image: Image.Image) -> list[str]:
 
 
 def decode_qr_from_pdf(path: Path, max_pages: int = 3) -> list[str]:
+    if _detector is None:
+        return []
     import pypdfium2 as pdfium
 
     from ..pdfium_lock import PDFIUM_LOCK
