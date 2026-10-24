@@ -944,7 +944,25 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                 return "ok"
             except Exception as exc:  # message only, never the connection string
                 return f"{type(exc).__name__}: {str(exc).splitlines()[0][:200] if str(exc) else ''}"
-        return JSONResponse({"status": "ok", "db": await run_in_threadpool(check_db),
+        def check_eta():
+            """?eta=1: can this server reach the tax authority (identity + API hosts)?"""
+            import requests as _rq
+            from invoice_extractor.eta_client import ENVIRONMENTS
+            hosts = ENVIRONMENTS.get(settings.eta_env)
+            if not hosts:
+                return settings.eta_env
+            out = {}
+            for name in ("identity", "api"):
+                try:
+                    r = _rq.get(hosts[name], timeout=10)
+                    out[name] = f"reachable ({r.status_code})"
+                except Exception as exc:
+                    out[name] = f"unreachable: {type(exc).__name__}"
+            return out
+        extra = {"eta_env": settings.eta_env}
+        if request.query_params.get("eta") == "1":
+            extra["eta"] = await run_in_threadpool(check_eta)
+        return JSONResponse({"status": "ok", "db": await run_in_threadpool(check_db), **extra,
                              "storage": settings.storage, "serverless": settings.serverless,
                              "ai": ai_vision.provider() if settings.use_ai else None,
                              "ocr": ocr.status() if settings.use_ocr else "off",
