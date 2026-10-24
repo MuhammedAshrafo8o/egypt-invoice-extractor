@@ -66,8 +66,7 @@ def find_drivers(configured: Optional[str] = None) -> list[str]:
             path = os.path.join(_WIN_DIR, name)
             if os.path.isfile(path):
                 found.append(path)
-        for pattern in ("*pkcs11*.dll", "*p11*.dll"):
-            found.extend(sorted(glob.glob(os.path.join(_WIN_DIR, pattern))))
+        found.extend(sorted(glob.glob(os.path.join(_WIN_DIR, "*pkcs11*.dll"))))   # other vendors' drivers
     seen, unique = set(), []
     for path in found:
         norm = os.path.normcase(os.path.abspath(path))

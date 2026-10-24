@@ -55,6 +55,22 @@ def set_autostart(on: bool) -> None:
                 pass
 
 
+def rtl_check(parent, text: str, var: tk.BooleanVar, bg: str, command=None, size: int = 10) -> tk.Frame:
+    """Tk's checkbox puts its box on the left; for Arabic the box goes on the right of the text."""
+    row = tk.Frame(parent, bg=bg)
+    box = tk.Checkbutton(row, variable=var, command=command, bg=bg, activebackground=bg, bd=0)
+    box.pack(side="right")
+    label = tk.Label(row, text=text, bg=bg, font=(FONT, size), cursor="hand2")
+    label.pack(side="right")
+
+    def toggle(_=None):
+        var.set(not var.get())
+        if command:
+            command()
+    label.bind("<Button-1>", toggle)
+    return row
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -105,8 +121,7 @@ class App:
         foot.pack(fill="x", side="bottom")
         self.auto = tk.BooleanVar(value=autostart_enabled())
         if sys.platform == "win32":
-            tk.Checkbutton(foot, text="يفتح لوحده لما الجهاز يشتغل", variable=self.auto, command=self._toggle_auto,
-                           bg=PAPER, font=(FONT, 10), anchor="e", activebackground=PAPER).pack(side="right")
+            rtl_check(foot, "يفتح لوحده لما الجهاز يشتغل", self.auto, PAPER, self._toggle_auto).pack(side="right")
         tk.Label(foot, text=f"نسخة {VERSION}", bg=PAPER, fg=MUTED, font=(FONT, 8)).pack(side="left")
 
     def _set_status(self, ok: bool, title: str, text: str) -> None:
@@ -212,8 +227,7 @@ class App:
         pin = tk.Entry(win, show="•", font=(FONT, 13), justify="center", relief="solid", bd=1)
         pin.pack(fill="x", ipady=5)
         remember = tk.BooleanVar(value=True)
-        tk.Checkbutton(win, text="افتكره لحد ما أقفل البرنامج", variable=remember, bg="white",
-                       font=(FONT, 9), anchor="e", activebackground="white").pack(fill="x", pady=(8, 0))
+        rtl_check(win, "افتكره لحد ما أقفل البرنامج", remember, "white", size=9).pack(anchor="e", pady=(8, 0))
         buttons = tk.Frame(win, bg="white")
         buttons.pack(fill="x", pady=(14, 0))
 

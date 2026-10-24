@@ -16,6 +16,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 25
     defaults:
       run:
         shell: pwsh
@@ -51,19 +52,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view -R disig/SoftHSM2-for-Windows --json tagName,assets *>&1 | Tee-Object ci-log.txt -Append
-          gh release download -R disig/SoftHSM2-for-Windows -p "*x64*.msi" -D softhsm *>&1 | Tee-Object ci-log.txt -Append
-          if (-not (Get-ChildItem softhsm -Filter *.msi -ErrorAction SilentlyContinue)) {
-            gh release download -R disig/SoftHSM2-for-Windows -p "*.msi" -D softhsm *>&1 | Tee-Object ci-log.txt -Append }
-          $msi = (Get-ChildItem softhsm -Filter *.msi | Select-Object -First 1).FullName
-          "msi=$msi" | Tee-Object ci-log.txt -Append
-          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn" -Wait
-          $dll = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2-x64.dll -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          if (-not $dll) { $dll = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2*.dll | Select-Object -First 1).FullName }
-          $util = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2-util.exe | Select-Object -First 1).FullName
-          $conf = (Get-ChildItem C:\SoftHSM2 -Recurse -Filter softhsm2.conf | Select-Object -First 1).FullName
+          gh release download -R disig/SoftHSM2-for-Windows -p "*portable.zip" -D softhsm *>&1 | Tee-Object ci-log.txt -Append
+          Expand-Archive (Get-ChildItem softhsm -Filter *.zip | Select-Object -First 1).FullName -DestinationPath softhsm\x
+          $dll = (Get-ChildItem softhsm\x -Recurse -Filter softhsm2-x64.dll | Select-Object -First 1).FullName
+          $util = (Get-ChildItem softhsm\x -Recurse -Filter softhsm2-util.exe | Select-Object -First 1).FullName
+          $tokens = "$PWD\softhsm\tokens"
+          New-Item -ItemType Directory -Force $tokens | Out-Null
+          $conf = "$PWD\softhsm\softhsm2.conf"
+          "directories.tokendir = $tokens`nobjectstore.backend = file`nlog.level = ERROR`n" | Set-Content -Encoding ascii $conf
           "dll=$dll util=$util conf=$conf" | Tee-Object ci-log.txt -Append
-          if (-not $dll -or -not $util) { exit 1 }
+          if (-not $dll -or -not $util) { Get-ChildItem softhsm\x -Recurse | Select-Object FullName | Out-String | Tee-Object ci-log.txt -Append; exit 1 }
           "SOFTHSM_DLL=$dll" >> $env:GITHUB_ENV
           "SOFTHSM_UTIL=$util" >> $env:GITHUB_ENV
           "SOFTHSM2_CONF=$conf" >> $env:GITHUB_ENV
@@ -73,19 +71,35 @@ jobs:
         if: steps.build.outcome == 'success'
         continue-on-error: true
         run: |
-          Start-Process dist\DaftarSigner.exe
-          Start-Sleep -Seconds 10
-          try { (Invoke-WebRequest http://127.0.0.1:47321/status -Headers @{Origin="https://daftar-blue.vercel.app"} -UseBasicParsing).Content | Tee-Object ci-log.txt -Append }
-          catch { "STATUS FAILED: $_" | Tee-Object ci-log.txt -Append }
           if ($env:SOFTHSM_DLL) { python signer_agent/ci/token_test.py *>&1 | Tee-Object -FilePath ci-log.txt -Append }
-          Start-Sleep -Seconds 3
+          Start-Process dist\DaftarSigner.exe
+          Start-Sleep -Seconds 12
+          try { $r = Invoke-WebRequest http://127.0.0.1:47321/status -UseBasicParsing -Headers @{Origin="https://daftar-blue.vercel.app"}
+                "EXE STATUS: " + [System.Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray()) | Tee-Object ci-log.txt -Append }
+          catch { "EXE STATUS FAILED: $_" | Tee-Object ci-log.txt -Append }
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-          $g = [System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-          $bmp.Save("screenshot.png", [System.Drawing.Imaging.ImageFormat]::Png)
-          "screenshot saved" | Tee-Object ci-log.txt -Append
+          function Shot($path) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png) }
+          Start-Sleep -Seconds 3
+          Shot "screenshot.png"
+          # ask the exe to sign: its PIN box opens (nobody types it here; just to see it)
+          try {
+            $status = [System.Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
+            $cert = $status.certificates[0].id
+            if ($cert) {
+              $body = @{ cert = $cert; to_sign = "aGVsbG8="; summary = "فاتورة INV-0001 — شركة الدلتا للتجارة — الإجمالي 11,400.00 جنيه" } | ConvertTo-Json
+              Start-Job -ScriptBlock { param($b) Invoke-WebRequest http://127.0.0.1:47321/sign -Method Post -UseBasicParsing `
+                -Headers @{Origin="https://daftar-blue.vercel.app"} -ContentType "application/json; charset=utf-8" `
+                -Body ([System.Text.Encoding]::UTF8.GetBytes($b)) } -ArgumentList $body | Out-Null
+              Start-Sleep -Seconds 5
+              Shot "pin.png"
+              "pin screenshot saved" | Tee-Object ci-log.txt -Append } }
+          catch { "PIN SHOT FAILED: $_" | Tee-Object ci-log.txt -Append }
+          Start-Sleep -Seconds 3
 
       - name: Publish
         if: steps.build.outcome == 'success'
@@ -100,6 +114,8 @@ jobs:
             dist/DaftarSigner.exe
             ci-log.txt
             screenshot.png
+            pin.png
+            signer_agent/ci/report.txt
 
       - name: Publish the log of a failed build
         if: steps.build.outcome != 'success'

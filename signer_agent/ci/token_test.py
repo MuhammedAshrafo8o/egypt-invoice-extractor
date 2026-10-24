@@ -5,7 +5,6 @@ import json
 import os
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
@@ -83,17 +82,6 @@ def main():
     except p11.TokenError as exc:
         log(f"wrong PIN message: {exc}")
 
-    # the built .exe: is its server up and does it see the token?
-    try:
-        req = urllib.request.Request("http://127.0.0.1:47321/status",
-                                     headers={"Origin": "https://daftar-blue.vercel.app"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            status = json.loads(r.read())
-        log(f"exe /status: ready={status.get('ready')} certs={[c['name'] for c in status.get('certificates', [])]}"
-            f" message={status.get('message')!r}")
-    except Exception as exc:
-        log(f"exe /status failed: {exc}")
-        ok = False
     log("RESULT: " + ("PASS" if ok else "FAIL"))
     with open(os.path.join(HERE, "report.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(report) + "\n")
