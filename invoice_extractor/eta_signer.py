@@ -218,7 +218,8 @@ class Pkcs11Signer(Signer):
             session.closeSession()
         if last_error and "PIN" in str(last_error).upper():
             raise SigningError("الرقم السري للتوكن غلط.")
-        raise SigningError(f"مالقيتش شهادة على التوكن للرقم الضريبي {tax_id or ''}".strip() + ".")
+        raise SigningError(f"مالقيتش شهادة على التوكن فيها {tax_id}." if tax_id
+                           else "مالقيتش شهادة توقيع على التوكن.")
 
     def _find(self, session, tax_id: str):
         P = self.P

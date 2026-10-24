@@ -684,7 +684,8 @@ class InvoiceService:
 
     # ------------------------------------------------- issuing e-invoices
     PROFILE_KEYS = ("issuer_name", "activity_code", "branch_id", "governate", "region_city", "street",
-                    "building_number", "item_type", "item_code", "unit_type", "signer", "pfx_path", "number_prefix")
+                    "building_number", "item_type", "item_code", "unit_type", "signer", "pfx_path", "number_prefix",
+                    "signer_owner", "cert_match")
 
     @staticmethod
     def profile(client) -> dict:
@@ -703,6 +704,7 @@ class InvoiceService:
         data = {k: (form.get(k) or "").strip() for k in self.PROFILE_KEYS}
         data["item_type"] = data["item_type"].upper() if data["item_type"].upper() in ("EGS", "GS1") else "EGS"
         data["signer"] = data["signer"] if data["signer"] in ("token", "pfx") else "token"
+        data["signer_owner"] = data["signer_owner"] if data["signer_owner"] in ("client", "office") else "client"
         self.db.update_client(client["id"], eta_profile=data)
 
     def issuer(self, client) -> Party:
@@ -858,6 +860,14 @@ class InvoiceService:
             self.db.save_party_details(client["accountant_id"], rec.id, rec.name,
                                        {k: v for k, v in rec.to_dict().items() if k not in ("id", "name")})
 
+    def signing_tax_id(self, client) -> str:
+        """The tax ID the certificate must carry. Empty when the office's own token signs:
+        then the certificate is the accountant's (national ID), registered as a delegate on the
+        client's portal, and it never carries the client's tax ID."""
+        if self.profile(client).get("signer_owner") == "office":
+            return ""
+        return client["tax_id"] or ""
+
     def signer_for(self, client, secret: str):
         profile = self.profile(client)
         if self.settings.eta_demo and not (profile.get("signer") == "pfx" and profile.get("pfx_path")):
@@ -868,7 +878,9 @@ class InvoiceService:
             return PfxSigner(path, "")
         if profile.get("signer") == "pfx":
             return PfxSigner(profile.get("pfx_path") or "", secret)
-        return Pkcs11Signer(self.settings.eta_pkcs11_lib, secret, client["tax_id"] or "")
+        match = (profile.get("cert_match") or "").strip() if profile.get("signer_owner") == "office" \
+            else (client["tax_id"] or "")
+        return Pkcs11Signer(self.settings.eta_pkcs11_lib, secret, match)
 
     def issue(self, client, invoice: dict, secret: str) -> dict:
         """Sign and submit one sale invoice. Returns the updated invoice row. Raises IssueError."""
@@ -886,7 +898,7 @@ class InvoiceService:
             raise IssueError(problems)
         try:
             signer = self.signer_for(client, secret)
-            cert_problems = check_certificate(signer.certificate(), client["tax_id"] or "")
+            cert_problems = check_certificate(signer.certificate(), self.signing_tax_id(client))
             if cert_problems and not self.settings.eta_demo:
                 raise IssueError(cert_problems)
             document = build_document(draft, self.issuer(client), profile)

@@ -240,6 +240,11 @@
     <fieldset class="span-2">
       <legend>التوقيع الإلكتروني</legend>
       <div class="grid-form">
+        <label class="span-2">مين بيوقّع فواتير العميل ده؟<select name="signer_owner" id="signer-owner">
+          <option value="client" {% if profile.signer_owner != 'office' %}selected{% endif %}>التوكن بتاع العميل نفسه (باسم شركته)</option>
+          <option value="office" {% if profile.signer_owner == 'office' %}selected{% endif %}>توكن المكتب — المحاسب مفوّض على بوابة العميل</option></select></label>
+        <label class="span-2 office-only">الرقم القومي أو اسم صاحب التوكن<input name="cert_match" value="{{ profile.cert_match or '' }}" placeholder="اختياري — لو على التوكن أكتر من شهادة">
+          <span class="hint">توكن المكتب بيوقّع لأي عميل المحاسب مفوّض عنده. لازم صاحب التوكن يكون متسجّل كمفوّض بالتوقيع على بوابة الفاتورة الإلكترونية بتاعة العميل ده، وإلا المنظومة هترفض الفاتورة.</span></label>
         <label>التوقيع بـ<select name="signer">
           <option value="token" {% if profile.signer == 'token' %}selected{% endif %}>التوكن (فلاشة التوقيع) متوصل بالجهاز</option>
           <option value="pfx" {% if profile.signer == 'pfx' %}selected{% endif %}>ملف شهادة PFX على الجهاز</option></select></label>

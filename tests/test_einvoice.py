@@ -226,6 +226,20 @@ class IssuingFlowTests(AppTestCase):
         data.update(over)
         return data
 
+    def test_office_token_signs_for_delegated_client(self):
+        """The office's token carries the accountant's national ID, not the client's tax ID,
+        so the tax-ID check on the certificate is skipped for clients marked 'office'."""
+        s, cid = self.setup_client("office-token@x.com", profile=False)
+        token = self.csrf(s, f"{self.base}/clients/{cid}")
+        s.post(f"{self.base}/clients/{cid}/einvoice-settings", data={
+            "csrf": token, "signer": "token", "signer_owner": "office", "cert_match": "29001011234567"})
+        client = self.db.get_client(cid)
+        self.assertEqual(self.service.profile(client)["signer_owner"], "office")
+        self.assertEqual(self.service.signing_tax_id(client), "")
+        s.post(f"{self.base}/clients/{cid}/einvoice-settings", data={"csrf": token, "signer": "token"})
+        client = self.db.get_client(cid)
+        self.assertEqual(self.service.signing_tax_id(client), "300112455")  # default: the client's own seal
+
     def test_issue_sale_invoice(self):
         s, cid = self.setup_client("issue@x.com")
         inv_id = self.new_sale(s, cid)
