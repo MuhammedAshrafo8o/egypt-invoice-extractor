@@ -1,6 +1,7 @@
 """Business logic shared by the dashboard, WhatsApp and ETA sync."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -18,7 +19,9 @@ from invoice_extractor.eta_demo import DemoETAClient
 from invoice_extractor.eta_issue import Draft, Line, Party, build_document, check_draft, document_hash_input, \
     lines_from_extracted, public_url
 from invoice_extractor.eta_signer import (PfxSigner, Pkcs11Signer, SigningError, check_certificate,
-                                          make_test_certificate, sign_document_bytes)
+                                          cms_assemble, cms_to_sign, make_test_certificate,
+                                          sign_document_bytes, verify_signature)
+from cryptography import x509
 from invoice_extractor.models import Invoice
 from invoice_extractor.pipeline import SUPPORTED_EXTS, clean_fields, process_file
 from invoice_extractor.validation import set_status, validate_invoice
@@ -703,7 +706,7 @@ class InvoiceService:
     def save_profile(self, client, form: dict) -> None:
         data = {k: (form.get(k) or "").strip() for k in self.PROFILE_KEYS}
         data["item_type"] = data["item_type"].upper() if data["item_type"].upper() in ("EGS", "GS1") else "EGS"
-        data["signer"] = data["signer"] if data["signer"] in ("token", "pfx") else "token"
+        data["signer"] = data["signer"] if data["signer"] in ("token", "pfx", "agent") else "token"
         data["signer_owner"] = data["signer_owner"] if data["signer_owner"] in ("client", "office") else "client"
         self.db.update_client(client["id"], eta_profile=data)
 
@@ -882,8 +885,7 @@ class InvoiceService:
             else (client["tax_id"] or "")
         return Pkcs11Signer(self.settings.eta_pkcs11_lib, secret, match)
 
-    def issue(self, client, invoice: dict, secret: str) -> dict:
-        """Sign and submit one sale invoice. Returns the updated invoice row. Raises IssueError."""
+    def _ready_to_issue(self, client, invoice: dict):
         if invoice["direction"] != "sale":
             raise IssueError(["الفاتورة دي مشتريات. الفاتورة الإلكترونية للمشتريات بيطلعها المورد مش احنا."])
         if invoice.get("eta_state") in ("submitted", "valid"):
@@ -896,6 +898,11 @@ class InvoiceService:
         problems = check_draft(draft, self.issuer(client), profile)
         if problems:
             raise IssueError(problems)
+        return eta, draft, profile
+
+    def issue(self, client, invoice: dict, secret: str) -> dict:
+        """Sign here (token on this machine, PFX, or the demo certificate) and submit. Raises IssueError."""
+        eta, draft, profile = self._ready_to_issue(client, invoice)
         try:
             signer = self.signer_for(client, secret)
             cert_problems = check_certificate(signer.certificate(), self.signing_tax_id(client))
@@ -906,6 +913,65 @@ class InvoiceService:
                                        "value": sign_document_bytes(document_hash_input(document), signer)}]
         except SigningError as exc:
             raise IssueError([str(exc)])
+        return self._submit(client, invoice, eta, document)
+
+    # The signing program ("دفتر للتوقيع") on the accountant's PC holds the token. The server
+    # never sees the key or the PIN: it sends the bytes to sign and gets back the signature.
+    SIGN_MAX_AGE = 15 * 60
+
+    def uses_signing_program(self, client) -> bool:
+        if self.profile(client).get("signer") == "agent":
+            return True
+        return bool(self.settings.serverless and not self.settings.eta_demo)
+
+    def _sign_box(self):
+        from itsdangerous import URLSafeTimedSerializer
+        return URLSafeTimedSerializer(self.settings.secret_key, salt="daftar-eta-sign")
+
+    def prepare_remote(self, client, invoice: dict, cert_b64: str) -> dict:
+        """Step 1: build the document and the bytes the token must sign, for this certificate."""
+        _, draft, profile = self._ready_to_issue(client, invoice)
+        try:
+            cert_der = base64.b64decode(cert_b64)
+            cert = x509.load_der_x509_certificate(cert_der)
+        except Exception:
+            raise IssueError(["برنامج التوقيع بعت شهادة مش مفهومة. طلّع التوكن ودخّله تاني وجرّب."])
+        cert_problems = check_certificate(cert, self.signing_tax_id(client))
+        if cert_problems and not self.settings.eta_demo:
+            raise IssueError(cert_problems)
+        document = build_document(draft, self.issuer(client), profile)
+        to_sign = cms_to_sign(document_hash_input(document), cert_der)
+        ticket = self._sign_box().dumps({"invoice": invoice["id"], "document": document,
+                                         "cert": cert_b64, "to_sign": base64.b64encode(to_sign).decode()})
+        return {"ticket": ticket, "to_sign": base64.b64encode(to_sign).decode(),
+                "summary": f"فاتورة {draft.internal_id} — {self.issuer(client).name} — "
+                           f"الإجمالي {draft.totals()['total']:,.2f} جنيه"}
+
+    def finish_remote(self, client, invoice: dict, ticket: str, signature_b64: str) -> dict:
+        """Step 2: put the token's signature in the document and submit it."""
+        from itsdangerous import BadSignature, SignatureExpired
+        eta, _, _ = self._ready_to_issue(client, invoice)
+        try:
+            data = self._sign_box().loads(ticket, max_age=self.SIGN_MAX_AGE)
+        except SignatureExpired:
+            raise IssueError(["عدّى وقت كتير من ساعة ما بدأت التوقيع. دوس «وقّع وابعت» تاني."])
+        except BadSignature:
+            raise IssueError(["طلب التوقيع مش سليم. دوس «وقّع وابعت» تاني."])
+        if data.get("invoice") != invoice["id"]:
+            raise IssueError(["التوقيع ده لفاتورة تانية."])
+        cert_der, to_sign = base64.b64decode(data["cert"]), base64.b64decode(data["to_sign"])
+        try:
+            signature = base64.b64decode(signature_b64)
+        except Exception:
+            signature = b""
+        if not signature or not verify_signature(cert_der, to_sign, signature):
+            raise IssueError(["التوقيع اللي رجع من التوكن مش مطابق للشهادة. جرّب تاني، ولو اتكرر ابعتلنا."])
+        document = data["document"]
+        document["signatures"] = [{"signatureType": "I",
+                                   "value": base64.b64encode(cms_assemble(cert_der, to_sign, signature)).decode()}]
+        return self._submit(client, invoice, eta, document)
+
+    def _submit(self, client, invoice: dict, eta, document: dict) -> dict:
         try:
             response = eta.submit_documents([document])
         except Exception as exc:

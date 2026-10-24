@@ -395,6 +395,10 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         })
 
     @login_required
+    async def signer_page(request: Request):
+        return render(request, "signer.html", nav="")
+
+    @login_required
     async def analytics(request: Request):
         uid = request.state.user["id"]
         period = valid_period(request.query_params.get("period"))
@@ -705,6 +709,15 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         return redirect(f"/invoices/{inv_id}/issue")
 
     # ------------------------------------------------------ e-invoice issuing
+    def flash_issue_result(request, invoice):
+        state = invoice.get("eta_state")
+        if state == "valid":
+            flash(request, "الفاتورة اتصدرت على المنظومة واتقبلت.", "success")
+        elif state == "submitted":
+            flash(request, "الفاتورة اتبعتت. المنظومة بتراجعها — حدّث الحالة بعد دقيقة.", "info")
+        else:
+            flash(request, "المنظومة رفضت الفاتورة — الأسباب مكتوبة تحت. صلّحها وابعت تاني.", "error")
+
     @login_required
     async def invoice_issue(request: Request):
         invoice = get_invoice_or_404(request, request.path_params["invoice_id"])
@@ -734,21 +747,26 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                     flash(request, ETA_STATE_LABELS.get(invoice.get("eta_state") or "", "اتحدثت الحالة."),
                           "success" if invoice.get("eta_state") == "valid" else "info")
                     return redirect(f"/invoices/{invoice['id']}/issue")
+                if action == "finish":   # the signing program signed: assemble and submit
+                    invoice = await run_in_threadpool(service.finish_remote, client, db.get_invoice(invoice["id"]),
+                                                      form.get("ticket", ""), form.get("signature", ""))
+                    flash_issue_result(request, invoice)
+                    return JSONResponse({"ok": True, "redirect": f"/invoices/{invoice['id']}/issue"})
                 draft = service.draft_from_form(form)
                 service.save_draft(client, invoice, draft)
+                if action == "prepare":  # for the signing program: what the token must sign
+                    prepared = await run_in_threadpool(service.prepare_remote, client, db.get_invoice(invoice["id"]),
+                                                       form.get("cert", ""))
+                    return JSONResponse({"ok": True, **prepared})
                 if action == "submit":
                     invoice = await run_in_threadpool(service.issue, client, db.get_invoice(invoice["id"]),
                                                       form.get("secret", ""))
-                    state = invoice.get("eta_state")
-                    if state == "valid":
-                        flash(request, "الفاتورة اتصدرت على المنظومة واتقبلت.", "success")
-                    elif state == "submitted":
-                        flash(request, "الفاتورة اتبعتت. المنظومة بتراجعها — حدّث الحالة بعد دقيقة.", "info")
-                    else:
-                        flash(request, "المنظومة رفضت الفاتورة — الأسباب مكتوبة تحت. صلّحها وابعت تاني.", "error")
+                    flash_issue_result(request, invoice)
                 else:
                     flash(request, "اتحفظت الفاتورة.", "success")
             except IssueError as exc:
+                if action in ("prepare", "finish"):
+                    return JSONResponse({"ok": False, "errors": exc.messages[:8]})
                 for msg in exc.messages[:8]:
                     flash(request, msg, "error")
             return redirect(f"/invoices/{invoice['id']}/issue")
@@ -759,6 +777,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         return render(request, "issue.html", invoice=invoice, client=client, draft=draft, profile=profile,
                       issuer=service.issuer(client), problems=problems, totals=draft.totals(),
                       line_amounts=line_amounts, can_issue=service.can_issue(client), nav="clients",
+                      signing_program=service.uses_signing_program(client),
                       locked=invoice.get("eta_state") in ("submitted", "valid"),
                       has_file=bool(invoice.get("stored_path")))
 
@@ -946,6 +965,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         Route("/invoices/export.csv", invoices_csv),
         Route("/api/search", api_search),
         Route("/analytics", analytics),
+        Route("/signer", signer_page),
         Route("/login", login, methods=["GET", "POST"]),
         Route("/register", register, methods=["GET", "POST"]),
         Route("/logout", logout, methods=["POST", "GET"]),

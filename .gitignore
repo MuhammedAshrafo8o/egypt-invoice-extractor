@@ -11,3 +11,6 @@ samples/invoices/
 data/
 *.db
 tessdata/
+signer_agent/ci/report.txt
+signer_agent/ci/screenshot.png
+signer_agent/ci/*.pem

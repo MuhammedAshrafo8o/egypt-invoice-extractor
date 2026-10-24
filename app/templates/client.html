@@ -247,7 +247,9 @@
           <span class="hint">توكن المكتب بيوقّع لأي عميل المحاسب مفوّض عنده. لازم صاحب التوكن يكون متسجّل كمفوّض بالتوقيع على بوابة الفاتورة الإلكترونية بتاعة العميل ده، وإلا المنظومة هترفض الفاتورة.</span></label>
         <label>التوقيع بـ<select name="signer">
           <option value="token" {% if profile.signer == 'token' %}selected{% endif %}>التوكن (فلاشة التوقيع) متوصل بالجهاز</option>
-          <option value="pfx" {% if profile.signer == 'pfx' %}selected{% endif %}>ملف شهادة PFX على الجهاز</option></select></label>
+          <option value="agent" {% if profile.signer == 'agent' %}selected{% endif %}>برنامج دفتر للتوقيع على جهاز المحاسب</option>
+          <option value="pfx" {% if profile.signer == 'pfx' %}selected{% endif %}>ملف شهادة PFX على الجهاز</option></select>
+          {% if settings.serverless %}<span class="hint">في النسخة الأونلاين التوقيع بيتم دايمًا ببرنامج التوقيع. <a href="/signer" target="_blank">نزّله من هنا</a>.</span>{% endif %}</label>
         <label>مكان ملف الشهادة (لو PFX)<input name="pfx_path" value="{{ profile.pfx_path or '' }}" dir="ltr" placeholder="C:\certs\client.pfx"></label>
       </div>
       <p class="muted small" style="margin-top:10px">{% if settings.eta_demo %}وضع التجربة شغال: السيستم بيوقّع بشهادة تجربة ومش بيبعت حاجة للمنظومة الحقيقية.{% else %}الرقم السري للتوكن أو الشهادة بيتكتب وقت الإرسال ومش بيتحفظ.{% endif %}</p>

@@ -6,3 +6,5 @@ tests
 samples/invoices
 **/__pycache__
 *.pyc
+signer_agent/
+.github/

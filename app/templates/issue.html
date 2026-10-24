@@ -158,7 +158,19 @@
 
     <section class="panel send-card">
       <button class="btn btn-block" type="submit" name="action" value="save">حفظ</button>
-      {% if can_issue %}
+      {% if can_issue and signing_program %}
+      <div class="sp-status" id="sp-status" data-signing-program data-agent="http://127.0.0.1:47321">
+        <span class="sp-dot"></span>
+        <div><strong id="sp-title">بيدوّر على برنامج التوقيع…</strong><div class="muted small" id="sp-text"></div></div>
+      </div>
+      <label id="sp-cert-wrap" hidden>توقّع بشهادة<select id="sp-cert"></select></label>
+      <button class="btn btn-small" type="button" id="sp-connect" hidden>اربط برنامج التوقيع بدفتر</button>
+      <button class="btn btn-stamp btn-block" type="button" id="sp-sign" disabled
+        data-confirm="الفاتورة هتتوقّع وتتبعت للمنظومة باسم {{ issuer.name }}. مش هينفع تتعدل بعد كده، ولو فيها غلط لازم تتلغي من البوابة.">
+        وقّع وابعت للمنظومة</button>
+      <ul class="issues" id="sp-errors" hidden></ul>
+      <a class="small" href="/signer" target="_blank" rel="noopener">إزاي أشغّل برنامج التوقيع؟</a>
+      {% elif can_issue %}
       {% if not settings.eta_demo %}
       <label>{% if profile.signer == 'pfx' %}كلمة سر ملف الشهادة{% else %}الرقم السري للتوكن (PIN){% endif %}
         <input type="password" name="secret" autocomplete="off" dir="ltr"></label>
@@ -189,6 +201,88 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+// Signing with the program on the accountant's PC: Daftar prepares, the token signs, Daftar submits.
+(function () {
+  var box = document.getElementById('sp-status');
+  if (!box) return;
+  var AGENT = box.dataset.agent, form = document.getElementById('issue-form');
+  var title = document.getElementById('sp-title'), text = document.getElementById('sp-text');
+  var btn = document.getElementById('sp-sign'), connect = document.getElementById('sp-connect');
+  var pick = document.getElementById('sp-cert'), pickWrap = document.getElementById('sp-cert-wrap');
+  var errors = document.getElementById('sp-errors'), certs = [], busy = false;
+
+  function state(kind, t, sub) {
+    box.className = 'sp-status ' + kind; title.textContent = t; text.innerHTML = sub || '';
+  }
+  function showErrors(list) {
+    errors.innerHTML = '';
+    (list || []).forEach(function (m) { var li = document.createElement('li'); li.className = 'issue issue-error'; li.textContent = m; errors.appendChild(li); });
+    errors.hidden = !list || !list.length;
+  }
+  function useStatus(data) {
+    connect.hidden = !data.needs_approval;
+    if (data.needs_approval) { state('warn', 'برنامج التوقيع شغال', 'دوس «اربط» مرة واحدة، والبرنامج هيسألك توافق.'); btn.disabled = true; return; }
+    certs = (data.certificates || []).filter(function (c) { return !c.expired; });
+    if (!data.ready || !certs.length) {
+      var expired = (data.certificates || []).length && !certs.length;
+      state('warn', expired ? 'شهادة التوكن منتهية' : 'برنامج التوقيع شغال', expired ? 'جدّد الشهادة من الشركة اللي طلّعت التوكن.' : (data.message || 'حط التوكن في الجهاز.'));
+      btn.disabled = true; pickWrap.hidden = true; return;
+    }
+    var keep = pick.value;
+    pick.innerHTML = '';
+    certs.forEach(function (c) { var o = document.createElement('option'); o.value = c.id; o.textContent = c.name + ' — لحد ' + c.valid_to; pick.appendChild(o); });
+    if (keep) pick.value = keep;
+    pickWrap.hidden = certs.length < 2;
+    state('ok', 'جاهز للتوقيع', 'التوكن: ' + certs[0].name.replace(/</g, '&lt;'));
+    if (!busy) btn.disabled = false;
+  }
+  function check() {
+    if (busy) return;
+    fetch(AGENT + '/status', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(useStatus).catch(function () {
+      connect.hidden = true; pickWrap.hidden = true; btn.disabled = true;
+      state('off', 'برنامج التوقيع مش شغال', 'افتحه من سطح المكتب. لو مش متسطب <a href="/signer" target="_blank" rel="noopener">نزّله من هنا</a>.');
+    });
+  }
+  connect.addEventListener('click', function () {
+    fetch(AGENT + '/connect', { method: 'POST' }).then(function (r) { return r.json(); }).then(useStatus).catch(check);
+  });
+  function post(data) {
+    return fetch(form.getAttribute('action') || location.pathname, { method: 'POST', body: data, credentials: 'same-origin' })
+      .then(function (r) { if (!r.ok) throw new Error('الصفحة رجّعت ' + r.status); return r.json(); });
+  }
+  btn.addEventListener('click', function () {
+    if (btn.dataset.confirm && !confirm(btn.dataset.confirm)) return;
+    var cert = certs.filter(function (c) { return c.id === (pick.value || certs[0].id); })[0] || certs[0];
+    busy = true; btn.disabled = true; showErrors([]);
+    var label = btn.textContent;
+    btn.textContent = 'بيجهّز الفاتورة…';
+    var data = new FormData(form); data.set('action', 'prepare'); data.set('cert', cert.der);
+    post(data).then(function (prep) {
+      if (!prep.ok) throw prep.errors;
+      btn.textContent = 'اكتب الرقم السري في برنامج التوقيع…';
+      return fetch(AGENT + '/sign', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cert: cert.id, to_sign: prep.to_sign, summary: prep.summary }) })
+        .then(function (r) { return r.json(); })
+        .then(function (signed) {
+          if (signed.error) throw [signed.error];
+          btn.textContent = 'بيبعت للمنظومة…';
+          var fin = new FormData(); fin.set('csrf', form.querySelector('[name=csrf]').value);
+          fin.set('action', 'finish'); fin.set('ticket', prep.ticket); fin.set('signature', signed.signature);
+          return post(fin);
+        });
+    }).then(function (done) {
+      if (!done.ok) throw done.errors;
+      location.href = done.redirect;
+    }).catch(function (err) {
+      showErrors(Array.isArray(err) ? err : ['ماقدرتش أكمّل التوقيع: ' + (err && err.message ? err.message : err)]);
+      busy = false; btn.textContent = label; check();
+    });
+  });
+  check();
+  setInterval(check, 5000);
+})();
+</script>
 <script>
 (function () {
   var form = document.getElementById('issue-form');

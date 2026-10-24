@@ -113,12 +113,15 @@ def signed_attributes(content: bytes, cert_der: bytes, moment: Optional[datetime
     ]
 
 
-def build_cms(content: bytes, signer: "Signer", moment: Optional[datetime] = None) -> bytes:
-    cert_der = signer.certificate_der()
+def cms_to_sign(content: bytes, cert_der: bytes, moment: Optional[datetime] = None) -> bytes:
+    """The exact bytes the private key signs: the signed attributes encoded as a SET (0x31).
+    Lets the key live elsewhere (the signing program on the accountant's PC)."""
+    return set_of(*signed_attributes(content, cert_der, moment))
+
+
+def cms_assemble(cert_der: bytes, to_sign: bytes, signature: bytes) -> bytes:
+    """The detached CMS SignedData around a signature made over cms_to_sign()."""
     cert = x509.load_der_x509_certificate(cert_der)
-    attrs = signed_attributes(content, cert_der, moment)
-    to_sign = set_of(*attrs)                      # signature covers the attrs encoded as SET (0x31)
-    signature = signer.sign(to_sign)
     is_ec = isinstance(cert.public_key(), ec.EllipticCurvePublicKey)
     sig_alg = seq(oid(OID_ECDSA_SHA256)) if is_ec else seq(oid(OID_RSA), NULL)
     signer_info = seq(
@@ -137,6 +140,28 @@ def build_cms(content: bytes, signer: "Signer", moment: Optional[datetime] = Non
         set_of(signer_info),
     )
     return seq(oid(OID_SIGNED_DATA), explicit(0, signed_data))
+
+
+def verify_signature(cert_der: bytes, data: bytes, signature: bytes) -> bool:
+    """True when signature is a valid SHA-256 signature over data by the certificate's key."""
+    from cryptography.exceptions import InvalidSignature
+    key = x509.load_der_x509_certificate(cert_der).public_key()
+    try:
+        if isinstance(key, rsa.RSAPublicKey):
+            key.verify(signature, data, padding.PKCS1v15(), hashes.SHA256())
+        elif isinstance(key, ec.EllipticCurvePublicKey):
+            key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
+        else:
+            return False
+    except InvalidSignature:
+        return False
+    return True
+
+
+def build_cms(content: bytes, signer: "Signer", moment: Optional[datetime] = None) -> bytes:
+    cert_der = signer.certificate_der()
+    to_sign = cms_to_sign(content, cert_der, moment)
+    return cms_assemble(cert_der, to_sign, signer.sign(to_sign))
 
 
 def sign_document_bytes(content: bytes, signer: "Signer", moment: Optional[datetime] = None) -> str:

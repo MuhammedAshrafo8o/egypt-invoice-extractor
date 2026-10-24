@@ -48,6 +48,7 @@ class Settings:
     whatsapp_display_number: str = ""
     # PKCS#11 library of the USB signing token (e.g. C:\\Windows\\System32\\eps2003csp11.dll)
     eta_pkcs11_lib: str = ""
+    signer_download_url: str = "https://github.com/MuhammedAshrafo8o/egypt-invoice-extractor/releases/latest/download/DaftarSigner.exe"
     storage: str = "local"           # local (disk) | db (inside the database, for serverless hosts)
     serverless: bool = False         # no background threads; jobs run from /internal/run-jobs
     cron_secret: str = ""            # protects /internal/run-jobs
@@ -97,6 +98,8 @@ def load_settings() -> Settings:
         vat_deadline_day=int(os.environ.get("VAT_DEADLINE_DAY", "0") or 0),
         whatsapp_display_number=os.environ.get("WHATSAPP_DISPLAY_NUMBER", ""),
         eta_pkcs11_lib=os.environ.get("ETA_PKCS11_LIB", ""),
+        signer_download_url=os.environ.get("SIGNER_DOWNLOAD_URL") or
+            "https://github.com/MuhammedAshrafo8o/egypt-invoice-extractor/releases/latest/download/DaftarSigner.exe",
         storage=os.environ.get("STORAGE", "local").strip().lower() or "local",
         serverless=_bool("SERVERLESS", bool(os.environ.get("VERCEL"))),
         cron_secret=os.environ.get("CRON_SECRET", ""),

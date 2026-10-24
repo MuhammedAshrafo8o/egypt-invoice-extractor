@@ -751,3 +751,20 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
 }
 
 form:has(#signer-owner option[value="client"]:checked) .office-only { display: none; }
+
+/* the signing program's status on the issue page */
+.sp-status { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r); background: var(--rule-2); }
+.sp-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); margin-top: 7px; flex: none; }
+.sp-status.ok { background: var(--ok-soft); } .sp-status.ok .sp-dot { background: var(--ok); }
+.sp-status.warn { background: var(--warn-soft); } .sp-status.warn .sp-dot { background: #d99a1b; }
+.sp-status.off { background: var(--err-soft); } .sp-status.off .sp-dot { background: var(--err); }
+.sp-status strong { font-size: .92rem; }
+.send-card #sp-errors { margin: 0; }
+.signer-steps { padding: 22px 24px; }
+.signer-steps ol { margin: 0; padding-inline-start: 22px; display: grid; gap: 22px; }
+.signer-steps li::marker { font-weight: 700; color: var(--ledger); }
+.signer-steps li p { margin: 4px 0 10px; max-width: 70ch; }
+.signer-faq { padding: 20px 24px; }
+.signer-faq dl { margin: 12px 0 0; display: grid; gap: 4px; }
+.signer-faq dt { font-weight: 600; margin-top: 10px; }
+.signer-faq dd { margin: 0; color: var(--ink-2); max-width: 75ch; }
