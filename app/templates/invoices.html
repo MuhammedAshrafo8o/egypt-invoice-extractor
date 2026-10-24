@@ -92,7 +92,7 @@
 
   {% if rows %}
   <div class="table-wrap">
-  <table class="table">
+  <table class="table cards">
     <thead><tr>
       <th>الحالة</th><th>الطرف الآخر</th><th>العميل</th><th>التاريخ</th><th>رقم الفاتورة</th>
       <th class="num">الضريبة</th><th class="num">الإجمالي</th>
@@ -101,9 +101,9 @@
     {% for inv in rows %}
       {% set other = inv.buyer_name if inv.direction == 'sale' else inv.supplier_name %}
       <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}'">
-        <td>{% if inv.approved %}<span class="chip chip-approved">معتمدة</span>
+        <td class="c-status">{% if inv.approved %}<span class="chip chip-approved">معتمدة</span>
             {% else %}<span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span>{% endif %}</td>
-        <td><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
+        <td class="c-main"><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
           <span class="tag">{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</span>
           {% set tid = inv.buyer_tax_id if inv.direction == 'sale' else inv.supplier_tax_id %}
           {% if tid %}<div class="row-note num-text">{{ tid }}</div>{% endif %}</td>
@@ -111,7 +111,7 @@
         <td><span class="num-text">{{ inv.invoice_date|dmy }}</span></td>
         <td class="nowrap"><bdi>{{ inv.invoice_number or '—' }}</bdi></td>
         <td class="num">{{ inv.vat_amount|money }}</td>
-        <td class="num strong">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
+        <td class="num strong c-total">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

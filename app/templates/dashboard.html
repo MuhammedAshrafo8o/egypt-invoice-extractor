@@ -80,7 +80,7 @@
   </div>
   {% if clients %}
   <div class="table-wrap">
-  <table class="table" id="clients-table">
+  <table class="table cards" id="clients-table">
     <thead><tr>
       <th>العميل</th><th>إقرار {{ period|period_label }}</th><th>محتاج مراجعة</th>
       <th class="num">ضريبة المخرجات</th><th class="num">ضريبة المدخلات</th><th class="num">الصافي</th>
@@ -88,11 +88,11 @@
     <tbody>
     {% for c in clients %}
       <tr class="row-link" data-search="{{ c.name }} {{ c.tax_id or '' }}" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
-        <td><a href="/clients/{{ c.id }}?period={{ period }}" class="strong">{{ c.name }}</a>
+        <td class="c-main"><a href="/clients/{{ c.id }}?period={{ period }}" class="strong">{{ c.name }}</a>
           <div class="row-note">{% if c.tax_id %}<span class="num-text">{{ c.tax_id }}</span>{% else %}من غير رقم ضريبي{% endif %}
             {% if c.whatsapp_phone %}<span class="tag">واتساب</span>{% endif %}{% if c.eta_client_id %}<span class="tag">مربوط بالمنظومة</span>{% endif %}
             {% if c.days_since is not none and c.days_since > 20 %}<span class="tag tag-warn">مابعتش من {{ c.days_since }} يوم</span>{% endif %}</div></td>
-        <td>
+        <td class="c-wide">
           {% if c.ready %}
             <span class="stamp" title="كل فواتير الشهر اتراجعت">جاهز<br>للإقرار</span>
           {% elif c.invoice_count %}

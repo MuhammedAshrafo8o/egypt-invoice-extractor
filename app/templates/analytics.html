@@ -77,12 +77,12 @@
     <span class="muted small">التغيّر الكبير في صافي الضريبة بيتعلّم عشان تراجعه قبل الإقرار</span></div>
   {% if clients %}
   <div class="table-wrap">
-  <table class="table">
+  <table class="table cards">
     <thead><tr><th>العميل</th><th class="num">فواتير</th><th class="num">صافي الشهر ده</th><th class="num">صافي الشهر اللي فات</th><th>التغيّر</th><th>محتاج مراجعة</th></tr></thead>
     <tbody>
     {% for c in clients %}
       <tr class="row-link" onclick="location.href='/clients/{{ c.id }}?period={{ period }}'">
-        <td><a class="strong" href="/clients/{{ c.id }}?period={{ period }}">{{ c.name }}</a></td>
+        <td class="c-main"><a class="strong" href="/clients/{{ c.id }}?period={{ period }}">{{ c.name }}</a></td>
         <td class="num">{{ c.invoices }}</td>
         <td class="num strong">{{ c.net|money }}</td>
         <td class="num">{{ c.prev_net|money }}</td>

@@ -18,19 +18,19 @@
     <span class="muted small">{{ items|length }} فاتورة</span>
   </div>
   <div class="table-wrap">
-  <table class="table">
+  <table class="table cards">
     <tbody>
     {% for inv in items %}
       {% set first = inv.issues|selectattr('level', 'equalto', 'error')|first or inv.issues|first %}
       <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}?queue=1'">
-        <td style="width:110px"><span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span></td>
-        <td>
+        <td class="c-status" style="width:110px"><span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span></td>
+        <td class="c-main">
           <a class="strong" href="/invoices/{{ inv.id }}?queue=1"><bdi>{{ inv.supplier_name or inv.original_filename or 'فاتورة' }}</bdi></a>
           {% if first %}<div class="row-note {% if first.level == 'error' %}error{% endif %}">{{ first.message_ar or first.message }}</div>{% endif %}
         </td>
-        <td class="muted small" style="white-space:nowrap">{{ inv.period|period_label }}</td>
-        <td class="num">{{ inv.total|money }}</td>
-        <td style="width:100px"><a class="btn btn-small" href="/invoices/{{ inv.id }}?queue=1">مراجعة</a></td>
+        <td class="muted small c-meta" style="white-space:nowrap">{{ inv.period|period_label }}</td>
+        <td class="num strong c-total">{{ inv.total|money }}</td>
+        <td class="c-act" style="width:100px"><a class="btn btn-small" href="/invoices/{{ inv.id }}?queue=1">مراجعة</a></td>
       </tr>
     {% endfor %}
     </tbody>

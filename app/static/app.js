@@ -231,3 +231,22 @@
     }
   } catch (e) {}
 })();
+
+// Phones: tables marked .cards turn into one card per row; each cell borrows its column title.
+(function () {
+  document.querySelectorAll('table.cards').forEach(function (table) {
+    var heads = Array.prototype.map.call(table.querySelectorAll('thead th'), function (th) { return th.textContent.trim(); });
+    if (!heads.length) return;
+    table.querySelectorAll('tbody tr').forEach(function (tr) {
+      Array.prototype.forEach.call(tr.children, function (td, i) {
+        if (heads[i] && !td.hasAttribute('data-label')) td.setAttribute('data-label', heads[i]);
+        var text = td.textContent.trim();
+        if ((text === '' || text === '—') && !td.querySelector('input')) td.classList.add('c-empty');
+      });
+    });
+  });
+  // close the account menu when tapping elsewhere
+  document.addEventListener('click', function (e) {
+    document.querySelectorAll('details.account[open]').forEach(function (d) { if (!d.contains(e.target)) d.open = false; });
+  });
+})();

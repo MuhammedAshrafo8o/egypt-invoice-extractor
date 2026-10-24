@@ -158,7 +158,7 @@
   </div>
   {% endif %}
   <div class="table-wrap">
-  <table class="table">
+  <table class="table cards">
     <thead><tr>
       {% if reviewable %}<th class="pick"></th>{% endif %}
       <th>الحالة</th><th>الطرف الآخر</th><th>التاريخ</th><th>رقم الفاتورة</th>
@@ -169,12 +169,12 @@
       {% set other = inv.buyer_name if inv.direction == 'sale' else inv.supplier_name %}
       {% set first = inv.issues|selectattr('level', 'equalto', 'error')|first or inv.issues|first %}
       <tr class="row-link" onclick="location.href='/invoices/{{ inv.id }}'">
-        {% if reviewable %}<td class="pick" onclick="event.stopPropagation()">
+        {% if reviewable %}<td class="pick c-pick" onclick="event.stopPropagation()">
           {% if inv.status == 'review' and not inv.approved %}<input type="checkbox" name="ids" value="{{ inv.id }}" form="bulk-form" class="pick-one" aria-label="اختار الفاتورة">{% endif %}
         </td>{% endif %}
-        <td>{% if inv.approved %}<span class="chip chip-approved">معتمدة</span>
+        <td class="c-status">{% if inv.approved %}<span class="chip chip-approved">معتمدة</span>
             {% else %}<span class="chip chip-{{ inv.status }}">{{ STATUS_LABELS[inv.status] }}</span>{% endif %}</td>
-        <td><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
+        <td class="c-main"><a href="/invoices/{{ inv.id }}" class="strong"><bdi>{{ other or inv.original_filename or '—' }}</bdi></a>
           <span class="tag">{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</span>
           {% if inv.channel != 'upload' %}<span class="tag">{{ CHANNEL_LABELS.get(inv.channel, inv.channel) }}</span>{% endif %}
           {% if inv.eta_state %}<span class="tag tag-eta-{{ inv.eta_state }}">{{ ETA_STATE_LABELS.get(inv.eta_state) }}</span>
@@ -184,8 +184,8 @@
         <td class="nowrap"><bdi>{{ inv.invoice_number or '—' }}</bdi></td>
         <td class="num">{{ inv.subtotal|money }}</td>
         <td class="num">{{ inv.vat_amount|money }}</td>
-        <td class="num strong">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
-        <td><a class="btn btn-small" href="/invoices/{{ inv.id }}">{{ 'عرض' if inv.approved or inv.status == 'ok' else 'مراجعة' }}</a></td>
+        <td class="num strong c-total">{{ inv.total|money }}{% if inv.currency and inv.currency != 'EGP' %} <span class="tag">{{ inv.currency }}</span>{% endif %}</td>
+        <td class="c-act"><a class="btn btn-small" href="/invoices/{{ inv.id }}">{{ 'عرض' if inv.approved or inv.status == 'ok' else 'مراجعة' }}</a></td>
       </tr>
     {% endfor %}
     </tbody>
