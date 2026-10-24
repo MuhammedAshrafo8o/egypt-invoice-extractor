@@ -211,6 +211,10 @@ class App:
     def _pin_dialog(self, info: dict):
         win = tk.Toplevel(self.root, bg="white", padx=20, pady=16)
         win.title("دفتر — توقيع فاتورة")
+        try:
+            win.iconbitmap(resource("daftar.ico"))
+        except Exception:
+            pass
         win.resizable(False, False)
         win.transient(self.root)
         result = {"value": None}

@@ -17,6 +17,9 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 25
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     defaults:
       run:
         shell: pwsh
