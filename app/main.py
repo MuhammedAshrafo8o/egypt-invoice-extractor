@@ -918,7 +918,16 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         return JSONResponse({"received": len(messages)}, background=BackgroundTask(work))
 
     async def health(request: Request):
-        return JSONResponse({"status": "ok", "ai": ai_vision.provider() if settings.use_ai else None,
+        def check_db():
+            try:
+                with db.connect() as conn:
+                    conn.execute("SELECT 1 FROM accountants LIMIT 1").fetchone()
+                return "ok"
+            except Exception as exc:  # message only, never the connection string
+                return f"{type(exc).__name__}: {str(exc).splitlines()[0][:200] if str(exc) else ''}"
+        return JSONResponse({"status": "ok", "db": await run_in_threadpool(check_db),
+                             "storage": settings.storage, "serverless": settings.serverless,
+                             "ai": ai_vision.provider() if settings.use_ai else None,
                              "ocr": ocr.status() if settings.use_ocr else "off",
                              "whatsapp": settings.whatsapp_enabled})
 
@@ -968,7 +977,10 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
                     exception_handlers={404: not_found, LookupError: lookup_error})
     app.state.db = db
     app.state.service = service
-    service.encrypt_stored_secrets()
+    try:
+        service.encrypt_stored_secrets()
+    except Exception:  # never keep the app from starting (e.g. database briefly unreachable)
+        log.exception("Encrypting stored secrets failed")
     service.job_listeners.append(lambda job: whatsapp.reply_when_read(job, db, wa))
     service.start_workers(settings.upload_workers)
     app.state.settings = settings
