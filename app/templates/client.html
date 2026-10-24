@@ -4,12 +4,12 @@
 {% block content %}
 <nav class="crumbs"><a href="/?period={{ period }}">الرئيسية</a> / {{ client.name }}</nav>
 
-<div class="page-head">
+<div class="page-head client-head">
   <div>
     <h1>{{ client.name }}</h1>
     <p class="sub">
       {% if client.tax_id %}الرقم الضريبي <span class="num-text">{{ client.tax_id }}</span>{% else %}<a href="#settings" onclick="document.getElementById('settings').open = true">ضيف الرقم الضريبي</a> عشان السيستم يفرّق بين المبيعات والمشتريات{% endif %}
-      {% if client.whatsapp_phone %} — واتساب <span class="num-text">+{{ client.whatsapp_phone }}</span>{% endif %}
+      {% if client.whatsapp_phone %}<span class="m-hide"> — واتساب <span class="num-text">+{{ client.whatsapp_phone }}</span></span>{% endif %}
     </p>
   </div>
   <div class="head-actions">
@@ -19,12 +19,12 @@
       </select>
     </form>
     {% if client.eta_client_id or settings.eta_demo %}
-    <form method="post" action="/clients/{{ client.id }}/eta-sync" class="inline" data-busy="بيسحب الفواتير من المنظومة…">
+    <form method="post" action="/clients/{{ client.id }}/eta-sync" class="inline" id="eta-sync-form" data-busy="بيسحب الفواتير من المنظومة…">
       <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="period" value="{{ period }}">
       <button class="btn" type="submit">{{ icon('sync') }} سحب من المنظومة</button>
     </form>
     {% endif %}
-    <form method="post" action="/clients/{{ client.id }}/sales/new" class="inline">
+    <form method="post" action="/clients/{{ client.id }}/sales/new" class="inline" id="new-sale-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="btn btn-stamp" type="submit" title="اكتب فاتورة مبيعات وابعتها للمنظومة كفاتورة إلكترونية">{{ icon('plus') }} فاتورة مبيعات إلكترونية</button>
     </form>
@@ -34,16 +34,32 @@
   </div>
 </div>
 
+{# Phones: the two things an accountant does here, plus a menu for the rest. #}
+<div class="m-actions">
+  <label class="btn btn-primary" for="files">{{ icon('upload') }} ارفع فواتير</label>
+  <button class="btn btn-stamp" type="submit" form="new-sale-form">{{ icon('plus') }} فاتورة مبيعات</button>
+  <details class="more-menu">
+    <summary class="btn" aria-label="أوامر تانية">⋯</summary>
+    <div class="menu">
+      {% if client.eta_client_id or settings.eta_demo %}<button type="submit" form="eta-sync-form">{{ icon('sync') }} سحب من المنظومة</button>{% endif %}
+      {% if remind_url %}<a href="{{ remind_url }}" target="_blank" rel="noopener">{{ icon('whatsapp') }} اطلب الفواتير على واتساب</a>{% endif %}
+      <a href="/clients/{{ client.id }}/report?period={{ period }}" target="_blank" rel="noopener">{{ icon('report') }} تقرير للعميل</a>
+      <a href="/clients/{{ client.id }}/export.xlsx?period={{ period }}">{{ icon('excel') }} تصدير Excel</a>
+      <a href="#settings" onclick="document.getElementById('settings').open = true">{{ icon('clients') }} بيانات العميل</a>
+    </div>
+  </details>
+</div>
+
 {% set pending = summary.error_count + summary.review_count %}
 <section class="panel client-sum">
   <div class="sum-cell">
-    <div class="label">ضريبة المخرجات (المبيعات)</div>
+    <div class="label"><span class="m-hide">ضريبة </span>المخرجات (المبيعات)</div>
     <div class="value num-text">{{ summary.sales.vat|money }}</div>
     <div class="hint">{{ summary.sales.count }} فاتورة بقيمة {{ summary.sales.subtotal|money }} قبل الضريبة</div>
     {% if summary.sales.unreviewed_count %}<div class="hint unreviewed">منها <span class="num-text">{{ summary.sales.unreviewed_vat|money }}</span> من {{ summary.sales.unreviewed_count }} فاتورة لسه ماتراجعتش</div>{% endif %}
   </div>
   <div class="sum-cell">
-    <div class="label">ضريبة المدخلات (المشتريات)</div>
+    <div class="label"><span class="m-hide">ضريبة </span>المدخلات (المشتريات)</div>
     <div class="value num-text">{{ summary.purchases.vat|money }}</div>
     <div class="hint">{{ summary.purchases.count }} فاتورة بقيمة {{ summary.purchases.subtotal|money }} قبل الضريبة</div>
     {% if summary.purchases.unreviewed_count %}<div class="hint unreviewed">منها <span class="num-text">{{ summary.purchases.unreviewed_vat|money }}</span> من {{ summary.purchases.unreviewed_count }} فاتورة لسه ماتراجعتش</div>{% endif %}

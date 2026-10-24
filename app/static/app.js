@@ -247,6 +247,6 @@
   });
   // close the account menu when tapping elsewhere
   document.addEventListener('click', function (e) {
-    document.querySelectorAll('details.account[open]').forEach(function (d) { if (!d.contains(e.target)) d.open = false; });
+    document.querySelectorAll('details.account[open], details.more-menu[open]').forEach(function (d) { if (!d.contains(e.target)) d.open = false; });
   });
 })();
