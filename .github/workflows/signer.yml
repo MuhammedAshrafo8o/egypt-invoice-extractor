@@ -61,7 +61,7 @@ jobs:
           $conf = "$PWD\softhsm\softhsm2.conf"
           "directories.tokendir = $tokens`nobjectstore.backend = file`nlog.level = ERROR`n" | Set-Content -Encoding ascii $conf
           "dll=$dll util=$util conf=$conf" | Tee-Object ci-log.txt -Append
-          if (-not $dll -or -not $util) { Get-ChildItem softhsm\x -Recurse | Select-Object FullName | Out-String | Tee-Object ci-log.txt -Append; exit 1 }
+          if (-not $dll) { Get-ChildItem softhsm\x -Recurse | Select-Object FullName | Out-String | Tee-Object ci-log.txt -Append; exit 1 }
           "SOFTHSM_DLL=$dll" >> $env:GITHUB_ENV
           "SOFTHSM_UTIL=$util" >> $env:GITHUB_ENV
           "SOFTHSM2_CONF=$conf" >> $env:GITHUB_ENV
@@ -71,7 +71,9 @@ jobs:
         if: steps.build.outcome == 'success'
         continue-on-error: true
         run: |
-          if ($env:SOFTHSM_DLL) { python signer_agent/ci/token_test.py *>&1 | Tee-Object -FilePath ci-log.txt -Append }
+          if ($env:SOFTHSM_DLL) {
+            python signer_agent/ci/token_test.py --setup *>&1 | Tee-Object -FilePath ci-log.txt -Append
+            python signer_agent/ci/token_test.py *>&1 | Tee-Object -FilePath ci-log.txt -Append }
           Start-Process dist\DaftarSigner.exe
           Start-Sleep -Seconds 12
           try { $r = Invoke-WebRequest http://127.0.0.1:47321/status -UseBasicParsing -Headers @{Origin="https://daftar-blue.vercel.app"}
