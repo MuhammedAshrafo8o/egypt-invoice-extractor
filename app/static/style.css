@@ -73,9 +73,10 @@ p { margin: 0; }
 .brand { display: flex; align-items: center; gap: 10px; color: #fff; font-weight: 700; font-size: 1.25rem; padding: 4px 8px 18px; }
 .brand:hover { text-decoration: none; }
 .brand-mark {
-  display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 9px;
-  background: #fff; color: var(--ledger); font-weight: 800; font-size: 1.1rem;
+  display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; flex: none;
+  background: #fff; --mark-bg: #fff; padding: 5px;
 }
+.brand-mark .logo-mark { width: 100%; height: 100%; display: block; }
 .quick-search {
   display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px; margin-bottom: 8px;
   border-radius: 8px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06);
@@ -410,6 +411,7 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
 .auth-side ul { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 10px; }
 .auth-side li { display: flex; gap: 10px; align-items: baseline; }
 .auth-side li::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #6ee0a8; flex: none; transform: translateY(-2px); }
+.auth-logo { display: none; }
 .auth-main { display: grid; place-items: center; padding: 32px 20px; }
 .auth-card { width: 100%; max-width: 380px; }
 .auth-card h1 { margin-bottom: 6px; }
@@ -441,7 +443,7 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
     background: var(--ledger); color: #fff; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top));
   }
   .topbar .brand { padding: 0; font-size: 1.1rem; margin-inline-end: auto; }
-  .topbar .brand-mark { width: 30px; height: 30px; }
+  .topbar .brand-mark { width: 32px; height: 32px; padding: 4px; }
   .topbar .icon-btn {
     display: inline-grid; place-items: center; width: 42px; height: 42px; border-radius: 10px;
     background: none; border: 0; color: var(--ledger-ink); cursor: pointer; list-style: none;
@@ -482,6 +484,8 @@ kbd { font: inherit; font-size: .74rem; padding: 1px 6px; border: 1px solid curr
   .action-bar .hint { display: none; }
   .auth { grid-template-columns: 1fr; }
   .auth-side { display: none; }
+  .auth-logo { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-bottom: 26px; --mark-bg: var(--paper); color: var(--ledger); font-weight: 700; font-size: 1.5rem; }
+  .auth-logo .logo-mark { width: 64px; height: 71px; }
   /* no zoom-on-focus in iOS Safari */
   input, select, textarea { font-size: 16px; }
   .btn-small { min-height: 38px; padding: 6px 14px; }

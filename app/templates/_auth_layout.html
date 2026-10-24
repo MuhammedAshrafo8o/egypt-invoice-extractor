@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% from "_icons.html" import logo %}
 {% block guest %}
 <div class="auth">
   <section class="auth-side">
-    <a class="brand" href="/login"><span class="brand-mark">د</span> دفتر</a>
+    <a class="brand" href="/login"><span class="brand-mark">{{ logo() }}</span> دفتر</a>
     <div>
       <h2>فواتير عملائك، متقرية ومتراجعة وجاهزة للإقرار.</h2>
       <ul>
@@ -16,6 +17,7 @@
   </section>
   <section class="auth-main">
     <div class="auth-card">
+      <div class="auth-logo">{{ logo() }}<span>دفتر</span></div>
       {% include "_flashes.html" %}
       {% block auth %}{% endblock %}
     </div>
