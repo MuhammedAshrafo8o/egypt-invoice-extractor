@@ -768,3 +768,15 @@ form:has(#signer-owner option[value="client"]:checked) .office-only { display: n
 .signer-faq dl { margin: 12px 0 0; display: grid; gap: 4px; }
 .signer-faq dt { font-weight: 600; margin-top: 10px; }
 .signer-faq dd { margin: 0; color: var(--ink-2); max-width: 75ch; }
+
+/* sidebar: download the signing program */
+.signer-dl {
+  display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(255,255,255,.08); border: 1px dashed rgba(255,255,255,.22); color: #fff; font-size: .9rem; font-weight: 500;
+}
+.signer-dl:hover { background: rgba(255,255,255,.14); text-decoration: none; }
+.signer-dl svg { width: 20px; height: 20px; flex: none; }
+.signer-dl span { display: grid; line-height: 1.35; }
+.signer-dl small { color: var(--ledger-ink); font-weight: 400; font-size: .74rem; opacity: .85; }
+@media (max-width: 820px) { .signer-dl { display: none; } }
+.account-menu .btn svg { width: 16px; height: 16px; }

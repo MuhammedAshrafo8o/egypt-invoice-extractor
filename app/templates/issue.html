@@ -168,6 +168,7 @@
       <button class="btn btn-stamp btn-block" type="button" id="sp-sign" disabled
         data-confirm="الفاتورة هتتوقّع وتتبعت للمنظومة باسم {{ issuer.name }}. مش هينفع تتعدل بعد كده، ولو فيها غلط لازم تتلغي من البوابة.">
         وقّع وابعت للمنظومة</button>
+      <a class="btn btn-primary btn-block" id="sp-download" href="{{ settings.signer_download_url }}" hidden>{{ icon('download') }} نزّل برنامج التوقيع</a>
       <ul class="issues" id="sp-errors" hidden></ul>
       <a class="small" href="/signer" target="_blank" rel="noopener">إزاي أشغّل برنامج التوقيع؟</a>
       {% elif can_issue %}
@@ -239,9 +240,12 @@
   }
   function check() {
     if (busy) return;
-    fetch(AGENT + '/status', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(useStatus).catch(function () {
+    fetch(AGENT + '/status', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      document.getElementById('sp-download').hidden = true; useStatus(d);
+    }).catch(function () {
+      document.getElementById('sp-download').hidden = false;
       connect.hidden = true; pickWrap.hidden = true; btn.disabled = true;
-      state('off', 'برنامج التوقيع مش شغال', 'افتحه من سطح المكتب. لو مش متسطب <a href="/signer" target="_blank" rel="noopener">نزّله من هنا</a>.');
+      state('off', 'برنامج التوقيع مش شغال', 'لو متنزّل افتحه من سطح المكتب. لو لأ، نزّله من الزرار ده وافتحه.');
     });
   }
   connect.addEventListener('click', function () {

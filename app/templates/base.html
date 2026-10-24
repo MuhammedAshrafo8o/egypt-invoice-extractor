@@ -24,6 +24,7 @@
       <div class="account-menu">
         <strong>{{ user.name }}</strong>
         <div class="reader {{ reader.kind }}"><span class="reader-dot"></span><span>{{ reader.label }}</span></div>
+        <a class="btn btn-small btn-block" href="{{ settings.signer_download_url }}" data-then="/signer">{{ icon('download') }} نزّل برنامج التوقيع</a>
         <form method="post" action="/logout"><button class="btn btn-small btn-block" type="submit">تسجيل خروج</button></form>
       </div>
     </details>
@@ -37,6 +38,8 @@
     <a class="nav-link {% if nav == 'invoices' %}active{% endif %}" href="/invoices">{{ icon('invoices') }}<span class="nav-text">الفواتير</span></a>
     <a class="nav-link {% if nav == 'analytics' %}active{% endif %}" href="/analytics">{{ icon('chart') }}<span class="nav-text">التحليلات</span></a>
     <a class="nav-link {% if nav == 'clients' %}active{% endif %}" href="/#clients">{{ icon('clients') }}<span class="nav-text">العملاء</span></a>
+    <a class="signer-dl" href="{{ settings.signer_download_url }}" data-then="/signer" title="برنامج صغير لويندوز عشان توقّع الفواتير الإلكترونية بالتوكن">
+      {{ icon('download') }}<span>نزّل برنامج التوقيع<small>للتوقيع بالتوكن من ويندوز</small></span></a>
     <div class="sidebar-foot">
       <div class="reader {{ reader.kind }}" title="الطريقة اللي بتتقري بيها الصور والـ PDF الممسوح — بتتغيّر من ملف .env">
         <span class="reader-dot"></span><span>{{ reader.label }}</span>
@@ -79,6 +82,9 @@ document.addEventListener('submit', function (e) {
   setTimeout(function () { document.getElementById('busy').hidden = false; }, 120);
 });
 document.addEventListener('click', function (e) {
+  // download links that then show how to use what was downloaded
+  var t = e.target.closest('a[data-then]');
+  if (t) { var next = t.dataset.then; setTimeout(function () { location.href = next; }, 600); }
   var b = e.target.closest('[data-dismiss]');
   if (b) b.parentElement.remove();
 });
