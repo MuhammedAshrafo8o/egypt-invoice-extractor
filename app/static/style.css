@@ -792,3 +792,32 @@ form:has(#signer-owner option[value="client"]:checked) .office-only { display: n
 }
 .setup-steps li.done .mark { background: var(--ok); color: #fff; }
 .setup-steps li.done strong { color: var(--ok); }
+
+/* company reports */
+.report-kpis .vat-kpi.owe .value { color: var(--err); }
+.report-kpis .vat-kpi.credit .value { color: var(--ok); }
+.vat-table tr.current td { background: var(--stamp-soft); font-weight: 600; }
+.vat-table tfoot td { border-top: 2px solid var(--rule); padding-top: 12px; }
+.einvoice-health .eh-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.eh { padding: 16px 22px; display: grid; gap: 6px; align-content: start; border-inline-start: 1px solid var(--rule-2); }
+.eh:first-child { border-inline-start: 0; }
+.eh strong { font-size: .95rem; }
+.eh.ok strong { color: var(--ok); }
+.eh.warn strong { color: var(--warn); }
+.eh span { font-size: .88rem; color: var(--ink-2); }
+@media (max-width: 820px) {
+  .einvoice-health .eh-grid { grid-template-columns: 1fr; }
+  .eh { border-inline-start: 0; border-top: 1px solid var(--rule-2); }
+  .eh:first-child { border-top: 0; }
+}
+@media print {
+  .sidebar, .topbar, .head-actions, .table-view, .flashes { display: none !important; }
+  .shell { display: block; }
+  .main { padding: 0; max-width: none; }
+  .panel { break-inside: avoid; box-shadow: none; }
+}
+@media (max-width: 640px) {
+  .vat-table th, .vat-table td { padding: 10px 6px; font-size: .8rem; }
+  .vat-table th:nth-child(4), .vat-table td:nth-child(4) { display: none; }
+  .report-kpis .kpi .value { font-size: 1.15rem; }
+}

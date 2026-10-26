@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}التقارير{% endblock %}
+{% macro delta(change, good_when_up=true) -%}
+  {% if change is not none %}
+    {% set up = change > 0 %}
+    <span class="delta {% if change == 0 or good_when_up is none %}flat{% elif up == good_when_up %}good{% else %}bad{% endif %}">
+      {% if change > 0 %}▲{% elif change < 0 %}▼{% endif %} {{ change|abs }}٪</span>
+  {% endif %}
+{%- endmacro %}
+{% block content %}
+{% set r = report %}
+<div class="page-head">
+  <div>
+    <h1>تقارير {{ client.name }}</h1>
+    <p class="sub">{{ period|period_label }} مقارنةً بـ{{ r.prev|period_label }}{% if r.cur.pending %} — <span class="hint unreviewed">مبدئي: فيه {{ r.cur.pending }} فاتورة لسه ماتراجعتش</span>{% endif %}</p>
+  </div>
+  <div class="head-actions">
+    <form method="get" class="inline">
+      <select name="period" onchange="this.form.submit()" aria-label="الشهر">
+        {% for p in periods %}<option value="{{ p }}" {% if p == period %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
+      </select>
+    </form>
+    <button class="btn" type="button" onclick="window.print()">{{ icon('report') }} اطبع أو احفظ PDF</button>
+    <a class="btn" href="/clients/{{ client.id }}/export.xlsx?period={{ period }}">{{ icon('excel') }} Excel الشهر</a>
+  </div>
+</div>
+
+<section class="panel kpis report-kpis">
+  <div class="kpi">
+    <div class="label">المبيعات (قبل الضريبة)</div>
+    <div class="value num-text">{{ r.cur.sales|money }}</div>
+    <div class="hint">{{ delta(r.sales_change) }} {{ r.cur.sales_count }} فاتورة</div>
+  </div>
+  <div class="kpi">
+    <div class="label">المشتريات (قبل الضريبة)</div>
+    <div class="value num-text">{{ r.cur.purchases|money }}</div>
+    <div class="hint">{{ delta(r.purchases_change, none) }} {{ r.cur.purchases_count }} فاتورة</div>
+  </div>
+  <div class="kpi vat-kpi {% if r.vat.payable %}owe{% else %}credit{% endif %}">
+    {% if r.vat.payable %}
+    <div class="label">ضريبة مستحقة عليك</div>
+    <div class="value num-text">{{ r.vat.payable|money }}</div>
+    <div class="hint">مخرجات {{ r.vat.output|money }} − مدخلات {{ r.vat.input|money }}{% if r.vat.carried_in %} − رصيد مرحّل {{ r.vat.carried_in|money }}{% endif %}</div>
+    {% else %}
+    <div class="label">رصيد دائن ليك</div>
+    <div class="value num-text">{{ r.vat.carry_out|money }}</div>
+    <div class="hint">بيترحّل للشهر الجاي ويتخصم من ضريبته</div>
+    {% endif %}
+  </div>
+  <div class="kpi">
+    <div class="label">الفرق بين المبيعات والمشتريات</div>
+    <div class="value num-text">{{ r.gap|money }}</div>
+    <div class="hint">مؤشر تقريبي، مش صافي ربح</div>
+  </div>
+</section>
+
+{% if r.insights %}
+<section class="panel insights">
+  <h2>ملاحظات الشهر</h2>
+  <ul>{% for line in r.insights %}<li>{{ line }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<div class="chart-grid">
+  <section class="panel chart-card">
+    <div class="chart-head"><h2>المبيعات والمشتريات آخر ١٢ شهر</h2>{{ trade_legend }}</div>
+    {{ trade_chart }}
+    <details class="table-view"><summary>عرض كجدول</summary>
+      <table class="table"><thead><tr><th>الشهر</th><th class="num">المبيعات</th><th class="num">المشتريات</th></tr></thead>
+      <tbody>{% for m in r.periods|reverse %}<tr><td>{{ m|period_label }}</td><td class="num">{{ r.by_month[m].sales|money }}</td>
+        <td class="num">{{ r.by_month[m].purchases|money }}</td></tr>{% endfor %}</tbody></table>
+    </details>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>ضريبة القيمة المضافة {{ period[:4] }}</h2></div>
+    <div class="table-wrap">
+    <table class="table vat-table">
+      <thead><tr><th>الشهر</th><th class="num">مخرجات</th><th class="num">مدخلات</th><th class="num">رصيد مرحّل</th><th class="num">المستحق</th></tr></thead>
+      <tbody>
+      {% for v in r.vat_rows|reverse %}
+        <tr {% if v.period == period %}class="current"{% endif %}><td>{{ (v.period|period_label).split(' ')[0] }}</td>
+          <td class="num">{{ v.output|money }}</td><td class="num">{{ v.input|money }}</td>
+          <td class="num">{{ v.carried_in|money if v.carried_in else '—' }}</td>
+          <td class="num strong">{% if v.payable %}{{ v.payable|money }}{% elif v.carry_out %}<span class="ok-text">رصيد {{ v.carry_out|money }}</span>{% else %}—{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+      <tfoot><tr><td class="strong">من أول السنة</td><td class="num">{{ r.ytd.sales_vat|money }}</td><td class="num">{{ r.ytd.purchases_vat|money }}</td><td></td>
+        <td class="num strong">{{ r.ytd.vat_paid|money }}</td></tr></tfoot>
+    </table>
+    </div>
+  </section>
+</div>
+
+<div class="chart-grid">
+  <section class="panel">
+    <div class="panel-head"><h2>أكبر العملاء</h2><span class="muted small">مبيعات {{ period|period_label }}</span></div>
+    {% if r.customers %}
+    <ul class="bar-list">
+      {% for c in r.customers %}
+      <li data-tip="{{ c.name }} | {{ c.count }} فاتورة | {{ c.share }}٪ من المبيعات" tabindex="0">
+        <div class="bar-label"><bdi class="strong">{{ c.name }}</bdi>{% if c.tax_id %}<span class="muted small num-text">{{ c.tax_id }}</span>{% endif %}</div>
+        <div class="bar-track"><i style="width: {{ (100 * c.amount / (r.customers[0].amount or 1))|round(1) }}%"></i></div>
+        <div class="bar-value num-text">{{ c.amount|money }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<div class="empty"><p class="muted">مفيش فواتير مبيعات محتسبة في {{ period|period_label }}.</p></div>{% endif %}
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>أكبر الموردين</h2><span class="muted small">مشتريات {{ period|period_label }}</span></div>
+    {% if r.suppliers %}
+    <ul class="bar-list">
+      {% for s in r.suppliers %}
+      <li data-tip="{{ s.name }} | {{ s.count }} فاتورة | ضريبة {{ s.vat|money }}" tabindex="0">
+        <div class="bar-label"><bdi class="strong">{{ s.name }}</bdi>{% if s.tax_id %}<span class="muted small num-text">{{ s.tax_id }}</span>{% endif %}</div>
+        <div class="bar-track"><i class="alt" style="width: {{ (100 * s.amount / (r.suppliers[0].amount or 1))|round(1) }}%"></i></div>
+        <div class="bar-value num-text">{{ s.amount|money }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<div class="empty"><p class="muted">مفيش فواتير مشتريات محتسبة في {{ period|period_label }}.</p></div>{% endif %}
+  </section>
+</div>
+
+{% set e = r.einvoice %}
+<section class="panel einvoice-health">
+  <div class="panel-head"><h2>الفاتورة الإلكترونية</h2><span class="muted small">{{ period|period_label }}</span></div>
+  <div class="eh-grid">
+    <div class="eh {% if e.sales_not_issued or e.sales_rejected %}warn{% else %}ok{% endif %}">
+      <strong>المبيعات</strong>
+      <span><b>{{ e.sales_issued }}</b> اتصدرت على المنظومة</span>
+      {% if e.sales_rejected %}<span class="error-text"><b>{{ e.sales_rejected }}</b> اترفضت ومحتاجة تتصلّح</span>{% endif %}
+      {% if e.sales_not_issued %}<span><b>{{ e.sales_not_issued }}</b> لسه ماطلعتش فاتورة إلكترونية</span>{% endif %}
+    </div>
+    <div class="eh {% if e.purchases_missing %}warn{% else %}ok{% endif %}">
+      <strong>المشتريات</strong>
+      <span><b>{{ e.purchases_matched }}</b> موجودة على المنظومة</span>
+      {% if e.purchases_missing %}<span class="error-text"><b>{{ e.purchases_missing }}</b> مش على المنظومة — ضريبة {{ e.purchases_missing_vat|money }} في خطر</span>{% endif %}
+      {% if e.purchases_unchecked %}<span class="muted"><b>{{ e.purchases_unchecked }}</b> ماتطابقتش لسه (اسحب من المنظومة من الصفحة الرئيسية)</span>{% endif %}
+    </div>
+    <div class="eh">
+      <strong>من أول السنة</strong>
+      <span>مبيعات <b class="num-text">{{ r.ytd.sales|money }}</b> في {{ r.ytd.sales_count }} فاتورة</span>
+      <span>مشتريات <b class="num-text">{{ r.ytd.purchases|money }}</b> في {{ r.ytd.purchases_count }} فاتورة</span>
+    </div>
+  </div>
+</section>
+{% endblock %}

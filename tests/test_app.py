@@ -793,3 +793,47 @@ class CompanyAccountTests(AppTestCase):
         s = self.session("office@x.com")
         self.assertIn('href="/#clients"', s.get(self.base + "/").text)
         self.assertEqual(s.get(self.base + "/settings", allow_redirects=False).status_code, 303)
+
+
+class CompanyReportTests(unittest.TestCase):
+    """The numbers on the company report page."""
+
+    def test_vat_carry_forward_and_parties(self):
+        from app.reports import company_report
+
+        def inv(direction, period, sub, name, tax, **kw):
+            row = {"direction": direction, "status": "ok", "approved": 1, "currency": "EGP", "channel": "upload",
+                   "subtotal": sub, "vat_amount": round(sub * .14, 2), "total": round(sub * 1.14, 2),
+                   "buyer_name": name if direction == "sale" else "Co", "buyer_tax_id": tax if direction == "sale" else "1",
+                   "supplier_name": name if direction == "purchase" else "Co",
+                   "supplier_tax_id": tax if direction == "purchase" else "1", "original_filename": "x",
+                   "eta_uuid": None, "eta_state": None, "eta_check": None}
+            row.update(kw)
+            return row
+
+        data = {
+            "2026-08": [inv("sale", "2026-08", 1000, "A", "111"), inv("purchase", "2026-08", 3000, "S", "900")],
+            "2026-09": [inv("sale", "2026-09", 4000, "A", "111"), inv("purchase", "2026-09", 1000, "S", "900")],
+            "2026-10": [inv("sale", "2026-10", 6000, "A", "111", eta_uuid="U1"), inv("sale", "2026-10", 2000, "B", "222"),
+                        inv("purchase", "2026-10", 1000, "S", "900", eta_check="missing"),
+                        inv("purchase", "2026-10", 500, "T", "901", status="error", approved=0)],
+        }
+
+        class DB:
+            def list_invoices(self, client_id, period):
+                return [dict(r) for r in data.get(period, [])]
+
+        r = company_report(DB(), {"id": 1}, "2026-10")
+        # Aug: 140 out - 420 in -> 280 credit; Sep: 560 - 140 - 280 = 140 due; Oct: 1120 - 140 = 980 due
+        rows = {v["period"]: v for v in r["vat_rows"]}
+        self.assertEqual((rows["2026-08"]["payable"], rows["2026-08"]["carry_out"]), (0.0, 280.0))
+        self.assertEqual(rows["2026-09"]["payable"], 140.0)
+        self.assertEqual(r["vat"]["payable"], 980.0)
+        self.assertEqual(r["ytd"]["vat_paid"], 1120.0)
+        self.assertEqual(r["periods"][0], "2026-08")            # empty months before the first invoice dropped
+        self.assertEqual((r["cur"]["sales"], r["cur"]["purchases"]), (8000.0, 1000.0))   # error not counted
+        self.assertEqual([(c["name"], c["share"]) for c in r["customers"]], [("A", 75), ("B", 25)])
+        self.assertEqual(r["sales_change"], 100)
+        e = r["einvoice"]
+        self.assertEqual((e["sales_issued"], e["sales_not_issued"], e["purchases_missing"]), (1, 1, 1))
+        self.assertTrue(any("980.00" in line for line in r["insights"]))

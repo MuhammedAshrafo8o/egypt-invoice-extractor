@@ -460,6 +460,18 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     async def analytics(request: Request):
         uid = request.state.user["id"]
         period = valid_period(request.query_params.get("period"))
+        if is_company(request.state.user):
+            from .reports import company_report
+            company = company_record(request.state.user)
+            report = await run_in_threadpool(company_report, db, company, period)
+            labels = [period_label(m).split(" ")[0] for m in report["periods"]]
+            trade_chart = charts.bar_chart(labels, [
+                {"name": "المبيعات", "values": [report["by_month"][m]["sales"] for m in report["periods"]]},
+                {"name": "المشتريات", "values": [report["by_month"][m]["purchases"] for m in report["periods"]]},
+            ], aria="المبيعات والمشتريات لكل شهر (قبل الضريبة)")
+            return render(request, "reports.html", nav="analytics", client=company, period=period,
+                          periods=recent_periods(db.periods(company["id"])), report=report,
+                          trade_chart=trade_chart, trade_legend=charts.legend(["المبيعات", "المشتريات"]))
         months = [period]
         for _ in range(5):
             months.insert(0, previous_period(months[0]))

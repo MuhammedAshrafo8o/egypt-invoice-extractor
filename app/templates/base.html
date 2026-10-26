@@ -36,7 +36,7 @@
     <a class="nav-link {% if nav == 'review' %}active{% endif %}" href="/review">{{ icon('review') }}<span class="nav-text">محتاج مراجعة</span><span class="nav-short">مراجعة</span>
       {% if pending_total %}<span class="nav-badge">{{ pending_total }}</span>{% endif %}</a>
     <a class="nav-link {% if nav == 'invoices' %}active{% endif %}" href="/invoices">{{ icon('invoices') }}<span class="nav-text">الفواتير</span></a>
-    <a class="nav-link {% if nav == 'analytics' %}active{% endif %}" href="/analytics">{{ icon('chart') }}<span class="nav-text">التحليلات</span></a>
+    <a class="nav-link {% if nav == 'analytics' %}active{% endif %}" href="/analytics">{{ icon('chart') }}<span class="nav-text">{{ 'التقارير' if company else 'التحليلات' }}</span></a>
     {% if company %}
     <a class="nav-link {% if nav == 'settings' %}active{% endif %}" href="/settings">{{ icon('settings') }}<span class="nav-text">الإعدادات</span></a>
     {% else %}
