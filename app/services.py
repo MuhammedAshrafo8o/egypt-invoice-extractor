@@ -158,11 +158,14 @@ def near_miss(a: str, b: str) -> bool:
 MINUTES_PER_INVOICE = 1.5  # typing one invoice by hand into Excel, as accountants estimate it
 
 
-def wa_link(phone: Optional[str], text: str) -> Optional[str]:
-    """Opens the accountant's own WhatsApp with the message ready to send (no API needed)."""
+def wa_link(phone: Optional[str], text: str, pick: bool = False) -> Optional[str]:
+    """Opens the accountant's own WhatsApp with the message ready to send (no API needed).
+    pick=True with no phone: WhatsApp asks which chat to send it to."""
     from urllib.parse import quote
 
-    return f"https://wa.me/{phone}?text={quote(text)}" if phone else None
+    if phone:
+        return f"https://wa.me/{phone}?text={quote(text)}"
+    return f"https://wa.me/?text={quote(text)}" if pick else None
 
 
 def reminder_text(client_name: str, office: str, period_label: str, days_left: Optional[int] = None,
@@ -226,6 +229,21 @@ class InvoiceService:
             return self.eta_client_factory(client["eta_client_id"], self.box.decrypt(client["eta_client_secret"]),
                                            env=self.settings.eta_env)
         return None
+
+    def test_eta(self, client) -> tuple[bool, str]:
+        """Log in to the ETA with the stored Client ID / Secret. Returns (ok, Arabic message)."""
+        eta = self.eta_client(client)
+        if not eta:
+            return False, "لسه مادخلتش Client ID و Client Secret."
+        try:
+            eta.token()
+        except Exception as exc:
+            text = str(exc)
+            if "invalid_client" in text or "(400)" in text or "(401)" in text:
+                return False, "المنظومة رفضت Client ID أو Client Secret. انسخهم تاني من البوابة (ERP System) واتأكد إنهم بتوع المنظومة الحقيقية."
+            return False, f"ماقدرناش نوصل للمنظومة دلوقتي: {text[:160]}"
+        where = {"prod": "المنظومة الحقيقية", "preprod": "المنظومة التجريبية"}.get(self.settings.eta_env, "وضع التجربة")
+        return True, f"الربط سليم ✓ — دفتر دخل على {where} ببيانات الشركة."
 
     @property
     def demo_store(self) -> Path:

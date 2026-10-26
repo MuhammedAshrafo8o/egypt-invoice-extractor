@@ -14,7 +14,7 @@
 <section class="panel">
   {% for (client_id, client_name), items in groups.items() %}
   <div class="group-head">
-    <a class="strong" href="/clients/{{ client_id }}">{{ client_name }}</a>
+    {% if company %}<span class="strong">محتاجة مراجعة</span>{% else %}<a class="strong" href="/clients/{{ client_id }}">{{ client_name }}</a>{% endif %}
     <span class="muted small">{{ items|length }} فاتورة</span>
   </div>
   <div class="table-wrap">

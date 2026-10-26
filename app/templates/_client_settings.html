@@ -1,0 +1,83 @@
+{# E-invoice settings + client/company data. Client page (offices) and /settings (companies). #}
+<details class="panel collapsible" id="einvoice" {% if open_all %}open{% endif %}>
+  <summary>إعدادات إصدار الفاتورة الإلكترونية</summary>
+  <div class="panel-body">
+  <p class="muted small" style="margin-bottom:14px">البيانات دي بتتكتب على كل فاتورة مبيعات بيصدرها {{ client.name }}، وبتلاقيها في بوابة المنظومة في ملف الممول. بتتظبط مرة واحدة.</p>
+  <form method="post" action="/clients/{{ client.id }}/einvoice-settings" class="grid-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>الاسم المسجّل في الضرائب<input name="issuer_name" value="{{ profile.issuer_name or '' }}" placeholder="{{ client.name }}"></label>
+    <label>كود النشاط<input name="activity_code" value="{{ profile.activity_code or '' }}" class="num-input" inputmode="numeric" placeholder="مثلًا 4620"></label>
+    <label>المحافظة<input name="governate" value="{{ profile.governate or '' }}"></label>
+    <label>المدينة / الحي<input name="region_city" value="{{ profile.region_city or '' }}"></label>
+    <label>الشارع<input name="street" value="{{ profile.street or '' }}"></label>
+    <label>رقم المبنى<input name="building_number" value="{{ profile.building_number or '' }}"></label>
+    <label>كود الفرع<input name="branch_id" value="{{ profile.branch_id or '0' }}" class="num-input"><span class="hint">٠ للفرع الرئيسي</span></label>
+    <label>بداية أرقام الفواتير<input name="number_prefix" value="{{ profile.number_prefix or 'INV-' }}" dir="ltr"></label>
+    <fieldset class="span-2">
+      <legend>كود الصنف الافتراضي</legend>
+      <p class="muted small" style="margin-bottom:12px">كل صنف في الفاتورة الإلكترونية لازم يكون ليه كود مسجّل على المنظومة (EGS أو GS1). اكتب الكود اللي العميل بيستخدمه أكتر، وتقدر تغيّره لأي صنف وإنت بتكتب الفاتورة.</p>
+      <div class="grid-form">
+        <label>نوع الكود<select name="item_type">
+          {% for t in ('EGS', 'GS1') %}<option {% if profile.item_type == t %}selected{% endif %}>{{ t }}</option>{% endfor %}</select></label>
+        <label>الكود<input name="item_code" value="{{ profile.item_code or '' }}" dir="ltr" placeholder="EG-{{ client.tax_id or '000000000' }}-1"></label>
+        <label>الوحدة<select name="unit_type">
+          {% for code, label in UNIT_TYPES.items() %}<option value="{{ code }}" {% if profile.unit_type == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      </div>
+    </fieldset>
+    <fieldset class="span-2">
+      <legend>التوقيع الإلكتروني</legend>
+      <div class="grid-form">
+        {% if company %}<input type="hidden" name="signer_owner" value="client">{% else %}
+        <label class="span-2">مين بيوقّع فواتير العميل ده؟<select name="signer_owner" id="signer-owner">
+          <option value="client" {% if profile.signer_owner != 'office' %}selected{% endif %}>التوكن بتاع العميل نفسه (باسم شركته)</option>
+          <option value="office" {% if profile.signer_owner == 'office' %}selected{% endif %}>توكن المكتب — المحاسب مفوّض على بوابة العميل</option></select></label>
+        <label class="span-2 office-only">الرقم القومي أو اسم صاحب التوكن<input name="cert_match" value="{{ profile.cert_match or '' }}" placeholder="اختياري — لو على التوكن أكتر من شهادة">
+          <span class="hint">توكن المكتب بيوقّع لأي عميل المحاسب مفوّض عنده. لازم صاحب التوكن يكون متسجّل كمفوّض بالتوقيع على بوابة الفاتورة الإلكترونية بتاعة العميل ده، وإلا المنظومة هترفض الفاتورة.</span></label>{% endif %}
+        <label>التوقيع بـ<select name="signer">
+          <option value="token" {% if profile.signer == 'token' %}selected{% endif %}>التوكن (فلاشة التوقيع) متوصل بالجهاز</option>
+          <option value="agent" {% if profile.signer == 'agent' %}selected{% endif %}>برنامج دفتر للتوقيع على جهاز المحاسب</option>
+          <option value="pfx" {% if profile.signer == 'pfx' %}selected{% endif %}>ملف شهادة PFX على الجهاز</option></select>
+          {% if settings.serverless %}<span class="hint">في النسخة الأونلاين التوقيع بيتم دايمًا ببرنامج التوقيع. <a href="/signer" target="_blank">نزّله من هنا</a>.</span>{% endif %}</label>
+        <label>مكان ملف الشهادة (لو PFX)<input name="pfx_path" value="{{ profile.pfx_path or '' }}" dir="ltr" placeholder="C:\certs\client.pfx"></label>
+      </div>
+      <p class="muted small" style="margin-top:10px">{% if settings.eta_demo %}وضع التجربة شغال: السيستم بيوقّع بشهادة تجربة ومش بيبعت حاجة للمنظومة الحقيقية.{% else %}الرقم السري للتوكن أو الشهادة بيتكتب وقت الإرسال ومش بيتحفظ.{% endif %}</p>
+    </fieldset>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">حفظ الإعدادات</button></div>
+  </form>
+  </div>
+</details>
+
+<details class="panel collapsible" id="settings" {% if open_all %}open{% endif %}>
+  <summary>{{ "بيانات الشركة والربط بالمنظومة" if company else "بيانات العميل والربط بالمنظومة" }}</summary>
+  <div class="panel-body">
+  <form method="post" action="/clients/{{ client.id }}/edit" class="grid-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>{{ "اسم الشركة" if company else "اسم العميل" }}<input name="name" value="{{ client.name }}" required></label>
+    <label>الرقم الضريبي<input name="tax_id" value="{{ client.tax_id or '' }}" inputmode="numeric" class="num-input"></label>
+    <label>رقم الواتساب<input name="whatsapp_phone" value="{{ client.whatsapp_phone or '' }}" inputmode="tel" class="num-input"></label>
+    <label>ملاحظات<input name="notes" value="{{ client.notes or '' }}"></label>
+    <fieldset class="span-2">
+      <legend>منظومة الفاتورة الإلكترونية</legend>
+      <p class="muted small" style="margin-bottom:12px">{{ "من بوابة الفاتورة الإلكترونية بتاعة الشركة" if company else "من بوابة المنظومة الخاصة بالعميل" }}: ERP System، وبعدين Client ID و Client Secret. بيتستخدموا لإصدار فواتير المبيعات، ولسحب الفواتير الإلكترونية بالظبط بدل قراءتها من الصورة.</p>
+      <div class="grid-form">
+        <label>Client ID<input name="eta_client_id" value="{{ client.eta_client_id or '' }}" dir="ltr" autocomplete="off"></label>
+        <label>Client Secret<input name="eta_client_secret" type="password" dir="ltr" autocomplete="new-password"
+          placeholder="{{ 'محفوظ. اكتب واحد جديد لو عايز تغيّره' if client.eta_client_secret else '' }}"></label>
+        {% if client.eta_client_id %}<label class="check"><input type="checkbox" name="clear_eta" value="1"> امسح بيانات الربط</label>{% endif %}
+      </div>
+    </fieldset>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">حفظ البيانات</button></div>
+  </form>
+  {% if not company %}
+  <form method="post" action="/clients/{{ client.id }}/edit" class="danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="delete">
+    <strong>مسح العميل</strong>
+    <p class="muted small">هيتمسح العميل وكل فواتيره ومش هترجع. اكتب اسمه بالظبط للتأكيد.</p>
+    <div class="inline">
+      <input name="confirm_name" placeholder="{{ client.name }}">
+      <button class="btn btn-danger" type="submit">مسح نهائي</button>
+    </div>
+  </form>
+  {% endif %}
+  </div>
+</details>

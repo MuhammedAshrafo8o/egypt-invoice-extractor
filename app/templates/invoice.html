@@ -19,7 +19,7 @@
 {% else %}
 <nav class="crumbs">
   <a href="/?period={{ invoice.period }}">الرئيسية</a> /
-  <a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /
+  {% if not company %}<a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /{% endif %}
   فاتورة <bdi>{{ invoice.invoice_number or ('#' ~ invoice.id) }}</bdi>
 </nav>
 {% endif %}

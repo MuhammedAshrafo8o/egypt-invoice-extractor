@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS accountants (
     name          TEXT NOT NULL,
     email         TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'office',
     created_at    TEXT NOT NULL
 );
 
@@ -230,6 +231,7 @@ class Database:
 
     # Columns added after the first release; older databases get them here.
     MIGRATIONS = {
+        "accountants": {"kind": "TEXT NOT NULL DEFAULT 'office'"},   # 'company' = one company, its own accountant
         "clients": {"eta_profile": "TEXT"},
         "invoices": {"eta_draft": "TEXT", "eta_state": "TEXT", "eta_message": "TEXT",
                      "eta_long_id": "TEXT", "eta_check": "TEXT", "file_hash": "TEXT"},
@@ -303,11 +305,18 @@ class Database:
             conn.close()
 
     # ---------------------------------------------------------------- accounts
-    def create_accountant(self, name: str, email: str, password: str) -> int:
+    def create_accountant(self, name: str, email: str, password: str, kind: str = "office") -> int:
+        kind = kind if kind in ("office", "company") else "office"
         with self.connect() as conn:
             return self._insert(
-                conn, "INSERT INTO accountants(name, email, password_hash, created_at) VALUES (?,?,?,?)",
-                (name.strip(), email.strip().lower(), hash_password(password), now()))
+                conn, "INSERT INTO accountants(name, email, password_hash, kind, created_at) VALUES (?,?,?,?,?)",
+                (name.strip(), email.strip().lower(), hash_password(password), kind, now()))
+
+    def company_of(self, accountant_id: int) -> Optional[sqlite3.Row]:
+        """A company account works on one record: the company itself (the first client row)."""
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM clients WHERE accountant_id = ? ORDER BY id LIMIT 1",
+                                (accountant_id,)).fetchone()
 
     def authenticate(self, email: str, password: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:

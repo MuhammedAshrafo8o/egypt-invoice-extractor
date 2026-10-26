@@ -37,7 +37,11 @@
       {% if pending_total %}<span class="nav-badge">{{ pending_total }}</span>{% endif %}</a>
     <a class="nav-link {% if nav == 'invoices' %}active{% endif %}" href="/invoices">{{ icon('invoices') }}<span class="nav-text">الفواتير</span></a>
     <a class="nav-link {% if nav == 'analytics' %}active{% endif %}" href="/analytics">{{ icon('chart') }}<span class="nav-text">التحليلات</span></a>
+    {% if company %}
+    <a class="nav-link {% if nav == 'settings' %}active{% endif %}" href="/settings">{{ icon('settings') }}<span class="nav-text">الإعدادات</span></a>
+    {% else %}
     <a class="nav-link {% if nav == 'clients' %}active{% endif %}" href="/#clients">{{ icon('clients') }}<span class="nav-text">العملاء</span></a>
+    {% endif %}
     <a class="signer-dl" href="{{ settings.signer_download_url }}" data-then="/signer" title="برنامج صغير لويندوز عشان توقّع الفواتير الإلكترونية بالتوكن">
       {{ icon('download') }}<span>نزّل برنامج التوقيع<small>للتوقيع بالتوكن من ويندوز</small></span></a>
     <div class="sidebar-foot">
@@ -60,7 +64,7 @@
 {% endif %}
 {% if user %}
 <div class="palette" id="palette" hidden role="dialog" aria-modal="true" aria-label="بحث سريع"
-     data-actions='[{"title":"الرئيسية","href":"/"},{"title":"محتاج مراجعة","href":"/review","sub":"ابدأ المراجعة"},{"title":"الفواتير","href":"/invoices","sub":"بحث وفلترة"},{"title":"التحليلات","href":"/analytics"},{"title":"عميل جديد","href":"/#new-client"}]'>
+     data-actions='[{"title":"الرئيسية","href":"/"},{"title":"محتاج مراجعة","href":"/review","sub":"ابدأ المراجعة"},{"title":"الفواتير","href":"/invoices","sub":"بحث وفلترة"},{"title":"التحليلات","href":"/analytics"},{% if company %}{"title":"الإعدادات","href":"/settings"}{% else %}{"title":"عميل جديد","href":"/#new-client"}{% endif %}]'>
   <div class="palette-box">
     <label class="palette-input">{{ icon('search') }}<input type="text" placeholder="دوّر على عميل، مورد، رقم فاتورة، أو مبلغ" autocomplete="off"></label>
     <ul class="palette-results" role="listbox"></ul>

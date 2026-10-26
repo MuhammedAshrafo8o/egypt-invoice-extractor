@@ -166,14 +166,18 @@ def create_user() -> None:
     from .db import Database
 
     db = Database(load_settings().database_path)
-    name = input("الاسم / اسم المكتب: ").strip()
+    kind = "office" if input("شركة ولا مكتب محاسبة؟ (ش/م) [ش]: ").strip() in ("م", "m", "office") else "company"
+    name = input("اسم الشركة: " if kind == "company" else "الاسم / اسم المكتب: ").strip()
+    tax_id = input("الرقم الضريبي للشركة: ").strip() if kind == "company" else ""
     email = input("الإيميل: ").strip()
     password = getpass.getpass("كلمة السر (٨ حروف على الأقل): ")
     if len(password) < 8 or "@" not in email or not name:
         sys.exit("بيانات غير صحيحة.")
     if db.email_exists(email):
         sys.exit("الإيميل متسجل قبل كده.")
-    db.create_accountant(name, email, password)
+    uid = db.create_accountant(name, email, password, kind)
+    if kind == "company":
+        db.create_client(uid, name, tax_id, "", "")
     print("✅ اتعمل الحساب.")
 
 

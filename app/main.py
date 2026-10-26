@@ -55,6 +55,21 @@ def missing_on_eta_text(client_name: str, office: str, invoices: list[dict]) -> 
     lines.append("ياريت تطلب من كل مورد يصدر الفاتورة الإلكترونية على رقمك الضريبي.")
     lines.append(f"شكرًا، {office}")
     return "\n".join(lines)
+def supplier_missing_text(company, invoices: list[dict]) -> str:
+    """What a company sends a supplier whose invoices are not on the e-invoice system."""
+    supplier = invoices[0].get("supplier_name") or "حضرتك"
+    tax = f" (رقمنا الضريبي {company['tax_id']})" if company["tax_id"] else ""
+    lines = [f"السلام عليكم {supplier}،",
+             f"الفواتير دي مش ظاهرة لنا على منظومة الفاتورة الإلكترونية، ومحتاجين تصدروها على {company['name']}{tax} "
+             "عشان الضريبة تتخصم:"]
+    for inv in invoices[:15]:
+        bits = [f"فاتورة {inv['invoice_number']}" if inv.get("invoice_number") else "فاتورة",
+                inv.get("invoice_date") or "", f"{inv['total']:,.2f} ج" if inv.get("total") is not None else ""]
+        lines.append("• " + " — ".join(b for b in bits if b))
+    lines.append("شكرًا.")
+    return "\n".join(lines)
+
+
 MONTHS_AR = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس",
              "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 
@@ -187,9 +202,11 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         flashes = session.pop("flashes", [])
         user = db.get_accountant(session["uid"]) if session.get("uid") else None
         return templates.TemplateResponse(request, template, {
-            "user": user, "csrf": session["csrf"], "flashes": flashes,
+            "user": user, "csrf": session["csrf"], "flashes": flashes, "company": is_company(user),
+            **({"nav": "home"} if is_company(user) and ctx.get("nav") == "clients" else {}),
             "settings": settings, "reader": reader_status(),
-            "pending_total": db.pending_count(user["id"]) if user else 0, **ctx,
+            "pending_total": db.pending_count(user["id"]) if user else 0,
+            **{k: v for k, v in ctx.items() if not (k == "nav" and is_company(user) and v == "clients")},
         }, status_code=status_code)
 
     def flash(request: Request, message: str, kind: str = "info") -> None:
@@ -225,6 +242,21 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             raise LookupError
         return client
 
+    def is_company(user) -> bool:
+        return bool(user) and (user["kind"] or "office") == "company"
+
+    def company_record(user):
+        """The company's own record (one per company account), created on first use."""
+        record = db.company_of(user["id"])
+        if record is None:
+            db.create_client(user["id"], user["name"], "", "", "")
+            record = db.company_of(user["id"])
+        return record
+
+    def settings_url(request: Request, client, anchor: str = "") -> str:
+        base = "/settings" if is_company(request.state.user) else f"/clients/{client['id']}"
+        return base + (f"#{anchor}" if anchor else "")
+
     def get_invoice_or_404(request: Request, invoice_id: int):
         invoice = db.get_invoice(invoice_id, request.state.user["id"])
         if not invoice:
@@ -253,9 +285,11 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             form = await request.form()
             name, email = form.get("name", "").strip(), form.get("email", "").strip()
             password = form.get("password", "")
+            kind = "office" if form.get("kind") == "office" else "company"
+            tax_id = "".join(ch for ch in form.get("tax_id", "") if ch.isdigit())
             errors = []
             if not name:
-                errors.append("اكتب اسمك أو اسم المكتب.")
+                errors.append("اكتب اسم الشركة." if kind == "company" else "اكتب اسمك أو اسم المكتب.")
             if "@" not in email:
                 errors.append("الإيميل مش صحيح.")
             elif db.email_exists(email):
@@ -265,10 +299,16 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             if errors:
                 for e in errors:
                     flash(request, e, "error")
-                return render(request, "register.html", name=name, email=email, status_code=400)
-            uid = db.create_accountant(name, email, password)
+                return render(request, "register.html", name=name, email=email, kind=kind, tax_id=tax_id,
+                              status_code=400)
+            uid = db.create_accountant(name, email, password, kind)
+            if kind == "company":
+                db.create_client(uid, name, tax_id, "", "")
             request.session.clear()
             request.session["uid"] = uid
+            if kind == "company":
+                flash(request, "أهلًا بيك! كمّل بيانات الشركة والربط بالمنظومة من الإعدادات، وبعدين ارفع أول فواتير.", "success")
+                return redirect("/settings")
             flash(request, "أهلًا بيك! ابدأ بإضافة أول عميل.", "success")
             return redirect("/")
         return render(request, "register.html")
@@ -280,6 +320,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     # ------------------------------------------------------------- dashboard
     @login_required
     async def dashboard(request: Request):
+        if is_company(request.state.user):
+            return client_page(request, company_record(request.state.user), nav="home")
         period = valid_period(request.query_params.get("period"))
         clients = db.list_clients(request.state.user["id"], period)
         for c in clients:
@@ -395,6 +437,22 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         })
 
     @login_required
+    async def company_settings(request: Request):
+        if not is_company(request.state.user):
+            return redirect("/")
+        client = company_record(request.state.user)
+        return render(request, "settings.html", client=client, profile=service.profile(client), nav="settings",
+                      eta_ready=bool(client["eta_client_id"] and client["eta_client_secret"]))
+
+    @login_required
+    async def client_eta_test(request: Request):
+        client = get_client_or_404(request, request.path_params["client_id"])
+        await form_with_csrf(request)
+        ok, message = await run_in_threadpool(service.test_eta, client)
+        flash(request, message, "success" if ok else "error")
+        return redirect(settings_url(request, client, "settings"))
+
+    @login_required
     async def signer_page(request: Request):
         return render(request, "signer.html", nav="")
 
@@ -491,6 +549,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     @login_required
     async def client_create(request: Request):
         form = await form_with_csrf(request)
+        if is_company(request.state.user):
+            return redirect("/")
         name = form.get("name", "").strip()
         phone = form.get("whatsapp_phone", "")
         if not name:
@@ -508,6 +568,11 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
     @login_required
     async def client_detail(request: Request):
         client = get_client_or_404(request, request.path_params["client_id"])
+        if is_company(request.state.user):     # one company, one page: its home
+            return redirect("/" + (f"?{request.url.query}" if request.url.query else ""))
+        return client_page(request, client)
+
+    def client_page(request: Request, client, nav: str = "clients"):
         period = valid_period(request.query_params.get("period"))
         status = request.query_params.get("status") or None
         direction = request.query_params.get("direction") or None
@@ -522,9 +587,17 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             client["name"], request.state.user["name"], period_label(period),
             deadline["days_left"] if deadline["period"] == period else None, settings.whatsapp_display_number))
         missing = service.missing_on_eta(client["id"], period)
-        missing_url = wa_link(client["whatsapp_phone"], missing_on_eta_text(
-            client["name"], request.state.user["name"], missing)) if missing else None
-        return render(request, "client.html", client=client, invoices=invoices, period=period, nav="clients",
+        if is_company(request.state.user):
+            remind_url = None           # nobody to remind: the company uploads its own invoices
+            missing_url = None
+            for inv in missing:         # one message per supplier, to send from the company's WhatsApp
+                same = [i for i in missing if (i.get("supplier_tax_id") or i.get("supplier_name")) ==
+                        (inv.get("supplier_tax_id") or inv.get("supplier_name"))]
+                inv["supplier_url"] = wa_link(None, supplier_missing_text(client, same), pick=True)
+        else:
+            missing_url = wa_link(client["whatsapp_phone"], missing_on_eta_text(
+                client["name"], request.state.user["name"], missing)) if missing else None
+        return render(request, "client.html", client=client, invoices=invoices, period=period, nav=nav,
                       remind_url=remind_url, q=q, missing=missing, missing_url=missing_url,
                       progress=db.batch_progress(client["id"]),
                       profile=service.profile(client), can_issue=service.can_issue(client),
@@ -538,14 +611,17 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         if form.get("action") == "delete":
             if form.get("confirm_name", "").strip() != client["name"]:
                 flash(request, "اكتب اسم العميل بالظبط عشان تأكد المسح.", "error")
-                return redirect(f"/clients/{client['id']}#settings")
+                return redirect(settings_url(request, client, "settings"))
+            if is_company(request.state.user):
+                flash(request, "حساب الشركة مينفعش يتمسح من هنا.", "error")
+                return redirect("/settings")
             db.delete_client(client["id"])
             flash(request, f"اتمسح العميل {client['name']} وكل فواتيره.", "success")
             return redirect("/")
         phone = form.get("whatsapp_phone", "")
         if db.phone_taken(phone, except_client_id=client["id"]):
             flash(request, "رقم الواتساب ده متسجل لعميل تاني.", "error")
-            return redirect(f"/clients/{client['id']}#settings")
+            return redirect(settings_url(request, client, "settings"))
         fields = {k: form.get(k, "") for k in ("name", "tax_id", "whatsapp_phone", "notes", "eta_client_id")}
         if form.get("eta_client_secret"):  # keep the stored secret unless a new one is typed
             fields["eta_client_secret"] = service.box.encrypt(form.get("eta_client_secret").strip())
@@ -553,10 +629,12 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
             fields["eta_client_id"] = ""
             fields["eta_client_secret"] = ""
         if not fields["name"].strip():
-            flash(request, "اسم العميل مطلوب.", "error")
+            flash(request, "الاسم مطلوب.", "error")
         else:
             db.update_client(client["id"], **fields)
-            flash(request, "اتحفظت بيانات العميل.", "success")
+            flash(request, "اتحفظت البيانات.", "success")
+        if is_company(request.state.user):
+            return redirect("/settings")
         return redirect(f"/clients/{client['id']}")
 
     @login_required
@@ -699,7 +777,7 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         service.save_profile(client, form)
         flash(request, "اتحفظت إعدادات الفاتورة الإلكترونية.", "success")
         nxt = form.get("next") or ""
-        return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else f"/clients/{client['id']}#einvoice")
+        return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else settings_url(request, client, "einvoice"))
 
     @login_required
     async def client_new_sale(request: Request):
@@ -984,6 +1062,8 @@ def create_app(settings: Settings | None = None, eta_client_factory=None,
         Route("/api/search", api_search),
         Route("/analytics", analytics),
         Route("/signer", signer_page),
+        Route("/settings", company_settings),
+        Route("/clients/{client_id:int}/eta-test", client_eta_test, methods=["POST"]),
         Route("/login", login, methods=["GET", "POST"]),
         Route("/register", register, methods=["GET", "POST"]),
         Route("/logout", logout, methods=["POST", "GET"]),

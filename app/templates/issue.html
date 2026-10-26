@@ -4,7 +4,7 @@
 {% block content %}
 <nav class="crumbs">
   <a href="/?period={{ invoice.period }}">الرئيسية</a> /
-  <a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /
+  {% if not company %}<a href="/clients/{{ client.id }}?period={{ invoice.period }}">{{ client.name }}</a> /{% endif %}
   فاتورة مبيعات إلكترونية
 </nav>
 
@@ -47,7 +47,7 @@
 {% if not can_issue %}
 <div class="panel notice">
   <strong>العميل لسه مش مربوط بالمنظومة.</strong>
-  <span class="muted">تقدر تكتب الفاتورة وتحفظها دلوقتي، وعشان تبعتها دخّل Client ID و Client Secret من <a href="/clients/{{ client.id }}#settings">بيانات العميل</a>.</span>
+  <span class="muted">تقدر تكتب الفاتورة وتحفظها دلوقتي، وعشان تبعتها دخّل Client ID و Client Secret من <a href="{{ '/settings' if company else '/clients/' ~ client.id }}#settings">{{ 'إعدادات الشركة' if company else 'بيانات العميل' }}</a>.</span>
 </div>
 {% endif %}
 
@@ -102,7 +102,7 @@
 
     <section class="panel">
       <div class="panel-head"><h2>الأصناف</h2>
-        <span class="muted small">كود الصنف الافتراضي: <bdi dir="ltr">{{ profile.item_code or '—' }}</bdi> (<a href="/clients/{{ client.id }}#einvoice">تغيير</a>)</span></div>
+        <span class="muted small">كود الصنف الافتراضي: <bdi dir="ltr">{{ profile.item_code or '—' }}</bdi> (<a href="{{ '/settings' if company else '/clients/' ~ client.id }}#einvoice">تغيير</a>)</span></div>
       <div class="table-wrap">
       <table class="table lines-table" id="lines">
         <thead><tr>

@@ -72,7 +72,7 @@
   </section>
 </div>
 
-<section class="panel">
+{% if not company %}<section class="panel">
   <div class="panel-head"><h2>العملاء: {{ period|period_label }} مقابل {{ prev|period_label }}</h2>
     <span class="muted small">التغيّر الكبير في صافي الضريبة بيتعلّم عشان تراجعه قبل الإقرار</span></div>
   {% if clients %}
@@ -96,7 +96,7 @@
   </table>
   </div>
   {% else %}<div class="empty"><p class="muted">لسه مفيش عملاء.</p></div>{% endif %}
-</section>
+</section>{% endif %}
 
 <div class="chart-grid">
   <section class="panel">

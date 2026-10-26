@@ -75,9 +75,15 @@ class FakeETA:
 
     secrets: list = []
 
+    def token(self):
+        if self.client_secret == "wrong":
+            raise Exception("Login failed (400): invalid_client")
+        return "token"
+
     def __init__(self, client_id, client_secret, env="preprod"):
         FakeETA.calls.append((client_id, env))
         FakeETA.secrets.append(client_secret)
+        self.client_secret = client_secret
 
     def search_documents(self, start, end, direction=None, page_size=100):
         yield {"uuid": "UUIDSALE1", "status": "Valid"}
@@ -141,9 +147,10 @@ class AppTestCase(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     # ---------------------------------------------------------------- helpers
-    def session(self, email, name="مكتب", password="password123"):
+    def session(self, email, name="مكتب", password="password123", kind="office", tax_id=""):
         s = requests.Session()
-        r = s.post(self.base + "/register", data={"name": name, "email": email, "password": password})
+        r = s.post(self.base + "/register", data={"name": name, "email": email, "password": password,
+                                                  "kind": kind, "tax_id": tax_id})
         if "متسجل قبل كده" in r.text:
             r = s.post(self.base + "/login", data={"email": email, "password": password})
         self.assertEqual(r.status_code, 200)
@@ -720,3 +727,69 @@ class UnitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompanyAccountTests(AppTestCase):
+    """A company's own accountant: one company, no clients list, settings in one place."""
+
+    def test_company_home_is_the_company(self):
+        s = self.session("company@x.com", name="شركة النيل للتوريدات", kind="company", tax_id="512334901")
+        user = self.db.authenticate("company@x.com", "password123")
+        self.assertEqual(user["kind"], "company")
+        company = self.db.company_of(user["id"])
+        self.assertEqual((company["name"], company["tax_id"]), ("شركة النيل للتوريدات", "512334901"))
+        home = s.get(self.base + "/").text
+        self.assertIn('id="upload-form"', home)          # upload straight from home
+        self.assertNotIn('href="/#clients"', home)        # no clients in the menu
+        self.assertIn('href="/settings"', home)
+        # the company's record has one address: home
+        r = s.get(f"{self.base}/clients/{company['id']}?period={PERIOD}", allow_redirects=False)
+        self.assertEqual((r.status_code, r.headers["location"]), (303, f"/?period={PERIOD}"))
+        # adding clients is an office thing
+        token = self.csrf(s, self.base + "/")
+        s.post(self.base + "/clients", data={"csrf": token, "name": "عميل"})
+        self.assertEqual(len([1 for _ in [self.db.company_of(user["id"])]]), 1)
+        with self.db.connect() as conn:
+            n = conn.execute("SELECT COUNT(*) AS n FROM clients WHERE accountant_id = ?", (user["id"],)).fetchone()["n"]
+        self.assertEqual(n, 1)
+
+    def test_settings_page_and_saving(self):
+        s = self.session("company2@x.com", name="شركة الأهرام", kind="company", tax_id="488201736")
+        page = s.get(self.base + "/settings").text
+        self.assertIn("بيانات الشركة والربط بالمنظومة", page)
+        self.assertIn("إعدادات إصدار الفاتورة الإلكترونية", page)
+        self.assertNotIn("توكن المكتب", page)             # a company signs with its own token
+        self.assertNotIn("مسح نهائي", page)
+        user = self.db.authenticate("company2@x.com", "password123")
+        company = self.db.company_of(user["id"])
+        token = self.csrf(s, self.base + "/settings")
+        r = s.post(f"{self.base}/clients/{company['id']}/edit", data={
+            "csrf": token, "name": "شركة الأهرام", "tax_id": "488201736", "eta_client_id": "abc",
+            "eta_client_secret": "secret"}, allow_redirects=False)
+        self.assertEqual(r.headers["location"], "/settings")
+        s.get(self.base + "/settings")
+        r = s.post(f"{self.base}/clients/{company['id']}/eta-test", data={"csrf": token})
+        self.assertIn("الربط سليم", r.text)
+        s.post(f"{self.base}/clients/{company['id']}/edit", data={
+            "csrf": token, "name": "شركة الأهرام", "tax_id": "488201736", "eta_client_id": "abc",
+            "eta_client_secret": "wrong"})
+        r = s.post(f"{self.base}/clients/{company['id']}/eta-test", data={"csrf": token})
+        self.assertIn("المنظومة رفضت Client ID", r.text)
+        r = s.post(f"{self.base}/clients/{company['id']}/einvoice-settings", data={
+            "csrf": token, "signer": "agent", "signer_owner": "office"}, allow_redirects=False)
+        self.assertEqual(r.headers["location"], "/settings#einvoice")
+
+    def test_company_purchases_and_sales_upload(self):
+        s = self.session("company3@x.com", name="Delta Trading Co.", kind="company", tax_id="300112455")
+        user = self.db.authenticate("company3@x.com", "password123")
+        company = self.db.company_of(user["id"])
+        self.upload(s, company["id"], "01_digital_ok.pdf")
+        invoices = self.db.list_invoices(company["id"], PERIOD)
+        self.assertEqual(invoices[0]["direction"], "purchase")   # bought by the company
+        listing = s.get(self.base + "/invoices").text
+        self.assertNotIn("<th>العميل</th>", listing)
+
+    def test_office_accounts_unchanged(self):
+        s = self.session("office@x.com")
+        self.assertIn('href="/#clients"', s.get(self.base + "/").text)
+        self.assertEqual(s.get(self.base + "/settings", allow_redirects=False).status_code, 303)

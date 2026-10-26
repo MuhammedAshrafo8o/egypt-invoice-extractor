@@ -19,10 +19,10 @@
     <button class="btn btn-primary" type="submit">بحث</button>
   </div>
   <div class="filter-row">
-    <select name="client" aria-label="العميل">
+    {% if not company %}<select name="client" aria-label="العميل">
       <option value="">كل العملاء</option>
       {% for c in clients %}<option value="{{ c.id }}" {% if params.client_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
-    </select>
+    </select>{% endif %}
     <select name="period" aria-label="الشهر">
       <option value="">كل الشهور</option>
       {% for p in periods %}<option value="{{ p }}" {% if params.period == p %}selected{% endif %}>{{ p|period_label }}</option>{% endfor %}
@@ -94,7 +94,7 @@
   <div class="table-wrap">
   <table class="table cards">
     <thead><tr>
-      <th>الحالة</th><th>الطرف الآخر</th><th>العميل</th><th>التاريخ</th><th>رقم الفاتورة</th>
+      <th>الحالة</th><th>الطرف الآخر</th>{% if not company %}<th>العميل</th>{% endif %}<th>التاريخ</th><th>رقم الفاتورة</th>
       <th class="num">الضريبة</th><th class="num">الإجمالي</th>
     </tr></thead>
     <tbody>
@@ -107,7 +107,7 @@
           <span class="tag">{{ 'مبيعات' if inv.direction == 'sale' else 'مشتريات' }}</span>
           {% set tid = inv.buyer_tax_id if inv.direction == 'sale' else inv.supplier_tax_id %}
           {% if tid %}<div class="row-note num-text">{{ tid }}</div>{% endif %}</td>
-        <td><a href="/clients/{{ inv.client_id }}?period={{ inv.period }}" onclick="event.stopPropagation()">{{ inv.client_name }}</a></td>
+        {% if not company %}<td><a href="/clients/{{ inv.client_id }}?period={{ inv.period }}" onclick="event.stopPropagation()">{{ inv.client_name }}</a></td>{% endif %}
         <td><span class="num-text">{{ inv.invoice_date|dmy }}</span></td>
         <td class="nowrap"><bdi>{{ inv.invoice_number or '—' }}</bdi></td>
         <td class="num">{{ inv.vat_amount|money }}</td>

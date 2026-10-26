@@ -2,13 +2,32 @@
 {% block title %}حساب جديد{% endblock %}
 {% block auth %}
 <h1>حساب جديد</h1>
-<p class="sub muted">حساب واحد للمكتب، وكل العملاء جواه.</p>
-<form method="post" class="stack">
-  <label>الاسم أو اسم المكتب<input name="name" value="{{ name or '' }}" required autofocus></label>
+<form method="post" class="stack" id="register-form">
+  <div class="seg" role="radiogroup" aria-label="نوع الحساب">
+    <label><input type="radio" name="kind" value="company" {% if kind != 'office' %}checked{% endif %}><span>شركة</span></label>
+    <label><input type="radio" name="kind" value="office" {% if kind == 'office' %}checked{% endif %}><span>مكتب محاسبة</span></label>
+  </div>
+  <p class="muted small" id="kind-hint"></p>
+  <label><span id="name-label">اسم الشركة</span><input name="name" value="{{ name or '' }}" required autofocus></label>
+  <label class="company-only">الرقم الضريبي للشركة<input name="tax_id" value="{{ tax_id or '' }}" inputmode="numeric" class="num-input" placeholder="٩ أرقام"></label>
   <label>الإيميل<input type="email" name="email" value="{{ email or '' }}" required autocomplete="email" dir="ltr"></label>
   <label>كلمة السر<input type="password" name="password" minlength="8" required autocomplete="new-password">
     <small class="muted">٨ حروف على الأقل</small></label>
   <button class="btn btn-primary btn-block" type="submit">اعمل الحساب</button>
 </form>
 <p class="auth-alt">عندك حساب؟ <a href="/login">سجّل دخول</a></p>
+<script>
+(function () {
+  var f = document.getElementById('register-form');
+  function sync() {
+    var company = f.querySelector('[name=kind]:checked').value === 'company';
+    document.getElementById('name-label').textContent = company ? 'اسم الشركة' : 'الاسم أو اسم المكتب';
+    document.getElementById('kind-hint').textContent = company
+      ? 'محاسب الشركة بيرفع فواتير المبيعات والمشتريات، وبيصدر الفواتير الإلكترونية بتوكن الشركة.'
+      : 'حساب واحد للمكتب، وكل العملاء جواه.';
+    f.querySelector('.company-only').hidden = !company;
+  }
+  f.addEventListener('change', sync); sync();
+})();
+</script>
 {% endblock %}
